@@ -1,0 +1,49 @@
+/-
+LakeWorkspace — the curated public surface.
+
+Clients use exactly these operations. Successful construction of a
+`Workspace` (via `load`) guarantees all workspace invariants; the internal
+modules `LakeWorkspace.{Toml,Workspace,Selection,Planner,Executor,Backend.*}`
+are implementation details and may change without notice.
+-/
+import LakeWorkspace.Workspace
+import LakeWorkspace.Selection
+import LakeWorkspace.Planner
+import LakeWorkspace.Executor
+
+namespace LakeWorkspace
+
+/-- Load, discover, resolve and validate the workspace rooted at `root`
+    (the directory containing `lean-workspace.toml`). Spawns no processes. -/
+def load (root : FilePath) : IO (Except Diagnostics Workspace) :=
+  Workspace.load root
+
+/-- Select a canonical set of package-qualified targets. Pure. -/
+def select (workspace : Workspace) (query : SelectionQuery) : Except Diagnostics Selection :=
+  Selection.select workspace query
+
+/-- Plan an action. Pure given the workspace, selection and action. -/
+def plan (workspace : Workspace) (selection : Selection) (action : Action) :
+    Except Diagnostics BuildPlan :=
+  Planner.plan workspace selection action
+
+/-- Execute a plan: the single Lake subprocess, transactional installs,
+    exit-code aggregation. -/
+def execute (plan : BuildPlan) : IO UInt32 :=
+  Executor.execute plan
+
+/-- `lakew check`: regenerate all generated files in memory and diff against
+    what is on disk. Empty array = up to date. -/
+def staleFiles (ws : Workspace) : IO (Array String) := do
+  let mut stale : Array String := #[]
+  for (rel, expected) in Backend.LakeCli.generatedFiles ws do
+    let target := ws.root / rel
+    let actual? ← try pure (some (← IO.FS.readFile target)) catch _ => pure none
+    match actual? with
+    | none => stale := stale.push s!"{rel.toString} (missing)"
+    | some actual =>
+      if actual != expected then
+        stale := stale.push s!"{rel.toString} (out of date)"
+  return stale
+
+end LakeWorkspace

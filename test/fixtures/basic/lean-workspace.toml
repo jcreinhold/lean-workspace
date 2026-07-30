@@ -1,0 +1,24 @@
+[workspace]
+members = [
+  "packages/*",
+]
+default-members = [
+  "core",
+  "syntax",
+  "tactics",
+]
+
+[policy]
+unique-module-roots = true
+require-direct-import-edges = true
+member-toolchains = "must-match-root"
+
+[cache]
+local = true
+restore = "requested-only"
+
+[groups.foundation]
+members = ["core", "syntax"]
+
+[groups.development]
+members = ["core", "syntax", "tactics"]
