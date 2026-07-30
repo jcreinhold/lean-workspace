@@ -1,0 +1,96 @@
+{
+ "lakew": 1,
+ "toolchain": "leanprover/lean4:v4.33.0-rc1",
+ "rootPackage": "repo",
+ "members": [
+  {
+   "name": "core",
+   "dir": "packages/core",
+   "moduleRoots": [
+    "Core"
+   ],
+   "modules": [
+    "Core",
+    "Core.Basic"
+   ],
+   "requires": []
+  },
+  {
+   "name": "syntax",
+   "dir": "packages/syntax",
+   "moduleRoots": [
+    "Syntax"
+   ],
+   "modules": [
+    "Syntax"
+   ],
+   "requires": [
+    {
+     "name": "core",
+     "type": "path",
+     "dir": "../core"
+    }
+   ]
+  },
+  {
+   "name": "tactics",
+   "dir": "packages/tactics",
+   "moduleRoots": [
+    "Tactic"
+   ],
+   "modules": [
+    "Tactic",
+    "Tactic.Elab"
+   ],
+   "requires": [
+    {
+     "name": "core",
+     "type": "path",
+     "dir": "../core"
+    },
+    {
+     "name": "syntax",
+     "type": "path",
+     "dir": "../syntax"
+    }
+   ]
+  }
+ ],
+ "edges": [
+  [
+   "syntax",
+   "core"
+  ],
+  [
+   "tactics",
+   "core"
+  ],
+  [
+   "tactics",
+   "syntax"
+  ]
+ ],
+ "groups": [
+  {
+   "name": "foundation",
+   "members": [
+    "core",
+    "syntax"
+   ]
+  },
+  {
+   "name": "development",
+   "members": [
+    "core",
+    "syntax",
+    "tactics"
+   ]
+  }
+ ],
+ "defaultMembers": [
+  "core",
+  "syntax",
+  "tactics"
+ ],
+ "fingerprint": "12660062024394973331"
+}

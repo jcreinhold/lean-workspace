@@ -1,0 +1,32 @@
+{
+ "schemaVersion": "1.2.0",
+ "packages": [
+  {
+   "type": "path",
+   "scope": "",
+   "name": "core",
+   "manifestFile": null,
+   "inherited": false,
+   "dir": "packages/core",
+   "configFile": "lakefile.lean"
+  },
+  {
+   "type": "path",
+   "scope": "",
+   "name": "syntax",
+   "manifestFile": null,
+   "inherited": false,
+   "dir": "packages/syntax",
+   "configFile": "lakefile.lean"
+  },
+  {
+   "type": "path",
+   "scope": "",
+   "name": "tactics",
+   "manifestFile": null,
+   "inherited": false,
+   "dir": "packages/tactics",
+   "configFile": "lakefile.lean"
+  }
+ ]
+}

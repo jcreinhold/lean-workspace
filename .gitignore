@@ -1,2 +1,4 @@
 .lake/
+!test/golden/**/.lake/
+!test/golden/**/.lake/**
 *~
