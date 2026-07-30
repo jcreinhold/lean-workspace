@@ -53,6 +53,7 @@ private structure CliOpts where
   groups : Array String := #[]
   targets : Array String := #[]
   changed : Option (Option String) := none
+  affected : Option (Option String) := none
   all : Bool := false
   writeDeps : Bool := false
   passthrough : Array String := #[]
@@ -101,6 +102,14 @@ private def parseArgs (args : List String) : Except String CliOpts := Id.run do
             else
               o := { o with changed := some none }
           | [] => o := { o with changed := some none }
+        | "--affected" =>
+          match rest with
+          | r :: as' =>
+            if !r.startsWith "-" then
+              o := { o with affected := some (some r) }; rest := as'
+            else
+              o := { o with affected := some none }
+          | [] => o := { o with affected := some none }
         | _ =>
           if a.startsWith "@" then
             o := { o with targets := o.targets.push a }
@@ -144,20 +153,30 @@ private def loadWs (o : CliOpts) : IO (Option Workspace) := do
     | .ok ws => return some ws
 
 private def mkQuery (o : CliOpts) (root : FilePath) : IO (Option SelectionQuery) := do
-  match o.changed with
-  | none =>
-    return some {
-      packages := o.packages, groups := o.groups, targets := o.targets
-      changedPaths := none, all := o.all }
-  | some ref? =>
+  let gitPaths (flag : String) (ref? : Option String) : IO (Option (Array FilePath)) := do
     match (← Backend.Git.changedPaths root ref?) with
     | .error e =>
-      IO.eprintln s!"error: --changed failed: {e}"
+      IO.eprintln s!"error: {flag} failed: {e}"
       return none
-    | .ok paths =>
-      return some {
-        packages := o.packages, groups := o.groups, targets := o.targets
-        changedPaths := some paths, all := o.all }
+    | .ok paths => return some paths
+  let changedPaths? ← match o.changed with
+    | none => pure (some none)
+    | some ref? => do
+      match (← gitPaths "--changed" ref?) with
+      | none => return none
+      | some ps => pure (some (some ps))
+  let affectedPaths? ← match o.affected with
+    | none => pure (some none)
+    | some ref? => do
+      match (← gitPaths "--affected" ref?) with
+      | none => return none
+      | some ps => pure (some (some ps))
+  match changedPaths?, affectedPaths? with
+  | some cp, some ap =>
+    return some {
+      packages := o.packages, groups := o.groups, targets := o.targets
+      changedPaths := cp, affectedPaths := ap, all := o.all }
+  | _, _ => return none
 
 private def runPlanned (o : CliOpts) (p : BuildPlan) : IO UInt32 := do
   if o.dryRun then
@@ -232,6 +251,33 @@ private def cmdGraph (o : CliOpts) : IO UInt32 := do
         IO.println s!"{m.name}: {" ".intercalate deps.toList}"
   return 0
 
+private def cmdWhy (o : CliOpts) (args : List String) : IO UInt32 := do
+  match args with
+  | [from_, to] => do
+    let some ws ← loadWs o | return 1
+    if (ws.findMember? from_).isNone then
+      IO.eprintln s!"error: unknown member `{from_}`"
+      return 2
+    if (ws.findMember? to).isNone then
+      IO.eprintln s!"error: unknown member `{to}`"
+      return 2
+    match ws.whyPath from_ to with
+    | some path =>
+      if o.json then
+        IO.println (Json.pretty (.obj #[
+          ("from", .str from_), ("to", .str to),
+          ("path", .arr (path.toArray.map .str)) ]))
+      else
+        IO.println s!"{from_} depends on {to} via:"
+        IO.println s!"  {" → ".intercalate path}"
+      return 0
+    | none =>
+      IO.eprintln s!"`{from_}` does not depend on `{to}`"
+      return 1
+  | _ =>
+    IO.eprintln "usage: lakew why <from> <to>"
+    return 2
+
 private def cmdMetadata (o : CliOpts) : IO UInt32 := do
   let some ws ← loadWs o | return 1
   if o.json then
@@ -250,6 +296,18 @@ def main (args : List String) : IO UInt32 := do
   | [] | ["help"] | ["--help"] | ["-h"] =>
     IO.println usage
     return 0
+  | "why" :: rest =>
+    -- why takes positional args; mini-parse only --root/--json here
+    let mut o : CliOpts := {}
+    let mut pos : List String := []
+    let mut rs := rest
+    repeat
+      match rs with
+      | [] => break
+      | "--json" :: as' => o := { o with json := true }; rs := as'
+      | "--root" :: r :: as' => o := { o with root := some ⟨r⟩ }; rs := as'
+      | a :: as' => pos := pos ++ [a]; rs := as'
+    cmdWhy o pos
   | cmd :: rest =>
     match parseArgs rest with
     | .error e =>

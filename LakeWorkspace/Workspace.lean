@@ -78,6 +78,13 @@ structure MemberPkg where
   targets : Array (String × TargetKind) := #[]
   testDriver : Option DriverSpec := none
   lintDriver : Option DriverSpec := none
+  /-- Canonical `⟨`name, value⟩` Lean-option tuples found in the lakefile
+      (value rendered as a string: `true`/`false`, a numeral, or a quoted
+      string). Used for `[options]` policy validation; see the phase-4 spike
+      note in `scanLakefile`. -/
+  declaredOptions : Array (String × String) := #[]
+  /-- Whether the lakefile mentions `leanOptions`/`moreLeanOptions` at all. -/
+  hasOptionAssignments : Bool := false
   deriving Repr, Inhabited
 
 /-- A canonical external dependency declared centrally in `[deps.<name>]`. -/
@@ -103,6 +110,11 @@ structure WorkspaceConfig where
       `[workspace.dependencies]` analog): the canonical source every member's
       `require <name>` must match exactly. -/
   deps : Array CentralDep := #[]
+  /-- Shared Lean options from `[options]` (the `[workspace.lints]` analog):
+      `(name, valueRepr)` where valueRepr is `true`/`false`, a numeral, or a
+      quoted string. Policy-validated, not propagated (Lake options do not
+      propagate to dependency packages). -/
+  options : Array (String × String) := #[]
   deriving Repr, Inhabited
 
 /-- An external (non-member) dependency requirement, as declared by one member. -/
@@ -123,6 +135,9 @@ structure Workspace where
   externals : Array ExternalRequire
   /-- Module → owning member name, sorted by module. -/
   moduleOwners : Array (String × String)
+  /-- Module → its imports (workspace modules and externals alike), for
+      module-level affected analysis. -/
+  moduleImports : Array (String × Array String)
   /-- The workspace toolchain (contents of the root `lean-toolchain`). -/
   toolchain : String
   deriving Repr, Inhabited
@@ -144,6 +159,45 @@ def fingerprint (ws : Workspace) : String :=
       (ws.members.map memStr).toList ++
         (ws.edges.map fun e => s!"{e.1}->{e.2}").toList
   toString (hash canon)
+
+/-- Reverse *module* import closure within the workspace: every workspace
+    module that transitively imports one of `start`. -/
+partial def reverseModuleClosure (ws : Workspace) (start : Array String) : Array String :=
+  let rec go (frontier seen : Array String) : Array String :=
+    if frontier.isEmpty then seen
+    else
+      let next := ws.moduleImports.filterMap fun (m, imps) =>
+        if imps.any frontier.contains && !seen.contains m && !frontier.contains m
+          then some m else none
+      go next (seen ++ frontier)
+  let all := go start #[]
+  all.insertionSort (· < ·) |>.toList.eraseDups.toArray
+
+/-- The module owned by member `m` at relative path `rel` (relative to the
+    workspace root), if it is a `.lean` file under the member. -/
+def moduleOfPath (ws : Workspace) (m : MemberPkg) (rel : FilePath) : Option String := do
+  let ps := rel.toString
+  let dir := m.relDir.toString
+  if !ps.startsWith (dir ++ "/") then none
+  let rest := (ps.drop (dir.length + 1)).toString
+  if !rest.endsWith ".lean" then none
+  let comps := rest.toList.take (rest.toList.length - 5)
+  some (".".intercalate ((String.ofList comps).splitOn "/"))
+
+/-- Shortest member-graph path from `from` to `to` through declared
+    dependencies (for `lakew why`). -/
+partial def whyPath (ws : Workspace) (from_ to : String) : Option (List String) :=
+  go #[(from_, [from_])] #[]
+where
+  go (queue : Array (String × List String)) (seen : Array String) : Option (List String) :=
+    match queue.toList with
+    | [] => none
+    | (cur, path) :: rest =>
+      if cur == to then some path.reverse
+      else
+        let nexts := ws.edges.filterMap fun (a, b) =>
+          if a == cur && !seen.contains b && b != cur then some (b, b :: path) else none
+        go (rest.toArray ++ nexts) (seen.push cur)
 
 def findMember? (ws : Workspace) (name : String) : Option MemberPkg :=
   ws.members.find? (·.name == name)
@@ -227,6 +281,13 @@ structure LakefileScan where
   targets : Array (String × TargetKind) := #[]
   testDriver : Option DriverSpec := none
   lintDriver : Option DriverSpec := none
+  /-- Canonical `⟨`name, value⟩` Lean-option tuples found in the lakefile
+      (value rendered as a string: `true`/`false`, a numeral, or a quoted
+      string). Used for `[options]` policy validation; see the phase-4 spike
+      note in `scanLakefile`. -/
+  declaredOptions : Array (String × String) := #[]
+  /-- Whether the lakefile mentions `leanOptions`/`moreLeanOptions` at all. -/
+  hasOptionAssignments : Bool := false
   deriving Repr, Inhabited
 
 /-- Extract the package name, `require` declarations, target declarations and
@@ -242,7 +303,6 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
   let mut taggedLint : Option String := none
   let mut i := 0
   let warn (msg : String) : Diagnostics := Diagnostics.warning s!"{origin.toString}: {msg}"
-  let tokIs (t : Tok) (s : String) : Bool := t == .ident s
   while i < toks.size do
     match toks[i]! with
     | .ident "package" =>
@@ -291,6 +351,8 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
         i := i + 1
       | _, _, _ => i := i + 1
     | .ident kw =>
+      if kw == "leanOptions" || kw == "moreLeanOptions" then
+        scan := { scan with hasOptionAssignments := true }
       if kw == "script" || kw == "lean_exe" || kw == "lean_lib" then
         let kind := if kw == "script" then TargetKind.script
           else if kw == "lean_exe" then TargetKind.exe else TargetKind.lib
@@ -349,6 +411,39 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
         | _, _ => i := i + 1
       else
         i := i + 1
+    | .sym '⟨' =>
+      -- canonical option tuple ⟨`name, value⟩; see phase-4 spike: real
+      -- lakefiles also compose options programmatically (`weak ++`, abbrevs),
+      -- which is deliberately out of scope for this scan.
+      match toks[i + 1]?, toks[i + 2]?, toks[i + 3]? with
+      | some (.sym '`'), some (.ident n), some (.sym ',') =>
+        let valueEnd (j : Nat) : Option (String × Nat) :=
+          match toks[j]? with
+          | some (.ident ".ofNat") =>
+            -- the common case: `.` is an ident char, so `.ofNat` is one token
+            match toks[j + 1]?, toks[j + 2]? with
+            | some (.ident num), some (.sym '⟩') => some (num, j + 3)
+            | _, _ => none
+          | some (.sym '.') =>
+            -- `.ofNat n` (only if the dot lexed separately)
+            match toks[j + 1]?, toks[j + 2]?, toks[j + 3]? with
+            | some (.ident "ofNat"), some (.ident num), some (.sym '⟩') => some (num, j + 4)
+            | _, _, _ => none
+          | some (.ident v) =>
+            match toks[j + 1]? with
+            | some (.sym '⟩') => some (v, j + 2)
+            | _ => none
+          | some (.str v) =>
+            match toks[j + 1]? with
+            | some (.sym '⟩') => some (s!"\"{v}\"", j + 2)
+            | _ => none
+          | _ => none
+        match valueEnd (i + 4) with
+        | some (v, j') =>
+          scan := { scan with declaredOptions := scan.declaredOptions.push (n, v) }
+          i := j'
+        | none => i := i + 1
+      | _, _, _ => i := i + 1
     | _ => i := i + 1
   -- Fold tags into drivers (Lake forbids config+tag together; mirror as warning).
   let testPh := scan.testDriver.getD { kind := "test", target := "" }
@@ -483,7 +578,8 @@ private def loadMember (root relDir : FilePath) : IO (Diagnostics × Option Memb
         name, relDir, requires := scan.requires, moduleRoots := roots,
         modules := modules.insertionSort (· < ·), toolchain := toolchain?,
         targets := scan.targets, testDriver := scan.testDriver,
-        lintDriver := scan.lintDriver })
+        lintDriver := scan.lintDriver, declaredOptions := scan.declaredOptions,
+        hasOptionAssignments := scan.hasOptionAssignments })
 
 /-! ## Config parsing -/
 
@@ -519,7 +615,7 @@ private def parseConfig (t : Toml.Table) : Diagnostics × WorkspaceConfig := Id.
   let groupNames := t.subsections "groups"
   let depNames := t.subsections "deps"
   for k in t.keys do
-    if !(knownKeys t groupNames depNames).contains k then
+    if !k.startsWith "options." && !(knownKeys t groupNames depNames).contains k then
       diags := diags ++ Diagnostics.warning s!"lean-workspace.toml: ignoring unknown key `{k}`"
   let mut cfg : WorkspaceConfig := {}
   if let some n := t.getStr "workspace.name" then cfg := { cfg with name := n }
@@ -551,6 +647,17 @@ private def parseConfig (t : Toml.Table) : Diagnostics × WorkspaceConfig := Id.
     match parseCentralDep t d with
     | .ok cd => cfg := { cfg with deps := cfg.deps.push cd }
     | .error ds => diags := diags ++ ds
+  -- [options]: every key under the `options.` prefix; name is the dotted tail
+  for (k, v) in t.entries do
+    if k.startsWith "options." then
+      let name := (k.drop 8).toString
+      match v with
+      | .boolean b => cfg := { cfg with options := cfg.options.push (name, toString b) }
+      | .int n => cfg := { cfg with options := cfg.options.push (name, toString n) }
+      | .str str => cfg := { cfg with options := cfg.options.push (name, s!"\"{str}\"") }
+      | .arr _ =>
+        diags := diags ++ Diagnostics.error
+          s!"[options] `{name}`: array values are not supported for Lean options"
   return (diags, cfg)
 
 /-! ## Validation -/
@@ -695,14 +802,17 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
     for d in gs do
       if !names.contains d then
         diags := diags ++ Diagnostics.error s!"group `{g}` references unknown member `{d}`"
-  -- 12. Architectural import checking
-  if config.requireDirectImportEdges then
-    for m in members do
-      for mod in m.modules do
-        let file : FilePath := root / m.relDir / (mod.replace "." "/" ++ ".lean")
-        let text? ← readOptionalFile file
-        if let some text := text? then
-          for imp in parseImports text do
+  -- 12. Module import map + architectural import checking
+  let mut moduleImports : Array (String × Array String) := #[]
+  for m in members do
+    for mod in m.modules do
+      let file : FilePath := root / m.relDir / (mod.replace "." "/" ++ ".lean")
+      let text? ← readOptionalFile file
+      if let some text := text? then
+        let imps := parseImports text
+        moduleImports := moduleImports.push (mod, imps)
+        if config.requireDirectImportEdges then
+          for imp in imps do
             match moduleOwners.find? (·.1 == imp) with
             | none => pure () -- external or generated module; not our concern
             | some (_, owner) =>
@@ -717,6 +827,25 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
                   diags := diags ++ Diagnostics.error
                     s!"production package `{m.name}` imports `{imp}` from test/benchmark \
                        package `{owner}`"
+  -- 13. [options] shared-option policy (validation, not propagation)
+  for (optName, optVal) in config.options do
+    for m in members do
+      match m.declaredOptions.find? (·.1 == optName) with
+      | some (_, v) =>
+        if v != optVal then
+          diags := diags ++ Diagnostics.error
+            s!"member `{m.name}` sets `{optName}` to {v}, but the workspace [options] \
+               policy requires {optVal}"
+            #[s!"{m.relDir.toString}/lakefile.lean", s!"lean-workspace.toml [options]"]
+      | none =>
+        if !m.hasOptionAssignments then
+          diags := diags ++ Diagnostics.error
+            s!"member `{m.name}` does not set required workspace option `{optName}`"
+            #[s!"add `⟨`{optName}, {optVal}⟩` to its leanOptions/moreLeanOptions"]
+        else
+          diags := diags ++ Diagnostics.warning
+            s!"could not verify `{optName}` in `{m.name}` (options composed beyond \
+               canonical ⟨name, value⟩ tuples; please verify manually)"
   if diags.hasErrors then
     return .error diags
   -- Warnings are still reported on success via the log; the model is complete.
@@ -724,7 +853,7 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
     if d.severity == .warning then
       IO.eprintln (Diagnostics.render #[d])
   return .ok {
-    root, config, members, edges, externals, moduleOwners, toolchain
+    root, config, members, edges, externals, moduleOwners, moduleImports, toolchain
   }
 
 /-! ## Dependency alignment (`lakew sync --write-deps`) -/

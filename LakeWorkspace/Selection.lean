@@ -32,6 +32,9 @@ structure SelectionQuery where
   /-- Paths changed relative to some git ref, relative to the workspace root.
       `none` = no changed-selection; `some #[]` = nothing changed. -/
   changedPaths : Option (Array FilePath) := none
+  /-- Like `changedPaths`, but selects via the reverse *module* import
+      closure instead of whole packages (doc §8 fine-grained selection). -/
+  affectedPaths : Option (Array FilePath) := none
   /-- Explicitly request all members. -/
   all : Bool := false
   deriving Repr, Inhabited
@@ -123,11 +126,39 @@ def select (ws : Workspace) (q : SelectionQuery) : Except Diagnostics Selection 
         for c in ws.reverseClosure owners.toArray do
           if !owners.contains c then
             st := add st c "depends on a changed package"
+    if let some paths := q.affectedPaths then
+      if paths.any isGlobalTrigger then
+        for m in ws.members do
+          st := add st m.name "globally affected (toolchain/manifest/policy changed)"
+      else
+        -- changed files → workspace modules → reverse module import closure
+        let mut startMods : Array String := #[]
+        let mut fallbackPkgs : Array String := #[]
+        for p in paths do
+          match ownerOfPath ws p with
+          | none => pure () -- outside all members; ignore
+          | some m =>
+            match ws.moduleOfPath m p with
+            | some mod =>
+              if !startMods.contains mod then startMods := startMods.push mod
+            | none =>
+              if !fallbackPkgs.contains m.name then
+                fallbackPkgs := fallbackPkgs.push m.name
+        for m in fallbackPkgs do
+          st := add st m "contains changed non-module files"
+        for mod in ws.reverseModuleClosure startMods do
+          match ws.moduleOwner? mod with
+          | some owner =>
+            if startMods.contains mod then
+              st := add st owner s!"module {mod} changed"
+            else
+              st := add st owner s!"module {mod} imports a changed module"
+          | none => pure ()
     let rawOk := q.targets.filter fun t =>
       match targetPackage t with
       | some pkg => names.contains pkg
       | none => false
-    if st.1.isEmpty && rawOk.isEmpty && !q.all then
+    if st.1.isEmpty && rawOk.isEmpty && !q.all && q.changedPaths.isNone && q.affectedPaths.isNone then
       let defs := if ws.config.defaultMembers.isEmpty then names else ws.config.defaultMembers
       let reason := if ws.config.defaultMembers.isEmpty
         then "all members (no default-members configured)"

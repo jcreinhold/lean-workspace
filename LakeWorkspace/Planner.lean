@@ -142,7 +142,14 @@ def plan (ws : Workspace) (sel : Selection) (action : Action) : Except Diagnosti
       explanations := #[] }
   | .build extraArgs =>
     if sel.targets.isEmpty then
-      .error (Diagnostics.error "empty selection: nothing to build")
+      -- e.g. `--changed` with no changes: a graceful no-op, not an error
+      .ok {
+        root := ws.root
+        label := "build"
+        steps := #[]
+        fingerprint := toString (hash (baseFp, "build", sel.targets, extraArgs))
+        explanations := sel.explanations
+        notes := #["empty selection: nothing to build"] }
     else
       .ok {
         root := ws.root

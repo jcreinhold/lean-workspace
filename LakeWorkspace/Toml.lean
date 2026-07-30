@@ -160,19 +160,26 @@ private partial def parseValue (s : PState) : Except String (Value × PState) :=
     else
       throw s!"unexpected value starting with '{c}'"
 
-/-- Parse a dotted key (`a.b.c`), returning its components. -/
+/-- Parse a dotted key (`a.b.c`), returning its components. Segments may be
+    bare or "quoted". -/
 private partial def parseKey (s : PState) : Except String (Array String × PState) := do
   let mut comps : Array String := #[]
   let mut s := s
   while true do
     s := skipTrivia s false
-    let start := s.pos
-    repeat
-      match s.peek? with
-      | some c => if isKeyChar c then s := s.next else break
-      | none => break
-    if s.pos == start then throw "expected key"
-    comps := comps.push (String.ofList (s.cs.extract start s.pos).toList)
+    match s.peek? with
+    | some '"' =>
+      let (v, s') ← parseString (s.next)
+      comps := comps.push v
+      s := s'
+    | _ =>
+      let start := s.pos
+      repeat
+        match s.peek? with
+        | some c => if isKeyChar c then s := s.next else break
+        | none => break
+      if s.pos == start then throw "expected key"
+      comps := comps.push (String.ofList (s.cs.extract start s.pos).toList)
     s := skipTrivia s false
     match s.peek? with
     | some '.' => s := s.next

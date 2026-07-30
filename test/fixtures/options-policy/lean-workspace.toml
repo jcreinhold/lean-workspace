@@ -1,0 +1,6 @@
+[workspace]
+members = ["packages/*"]
+
+[options]
+"linter.missingDocs" = true
+"maxSynthPendingDepth" = 3
