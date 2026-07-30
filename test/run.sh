@@ -14,6 +14,7 @@ check() { # check <name> <condition...>
     echo "ok   - $name"
   else
     echo "FAIL - $name"
+    "$@" 2>&1 | head -30
     failures=$((failures + 1))
   fi
 }
