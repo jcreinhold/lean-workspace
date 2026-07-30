@@ -1,4 +1,14 @@
 /-
+Copyright (c) 2026 Jacob Reinhold. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Jacob Reinhold
+-/
+module
+
+public import LakeWorkspace.Workspace
+public import LakeWorkspace.Json
+
+/-!
 The Lake-version-coupled backend: how generated files are spelled.
 
 This module is the *only* place that knows the syntax of a Lake
@@ -7,8 +17,8 @@ command-line surface of the pinned `lake` executable. Everything here is a
 pure rendering/decision function; process spawning lives in
 `LakeWorkspace.Executor`.
 -/
-import LakeWorkspace.Workspace
-import LakeWorkspace.Json
+
+public section
 
 namespace LakeWorkspace.Backend.LakeCli
 
@@ -115,3 +125,5 @@ def generatedFiles (ws : Workspace) : Array (FilePath × String) :=
    , (⟨".lake/workspace/metadata.json"⟩, Json.pretty (renderMetadata ws) ++ "\n") ]
 
 end LakeWorkspace.Backend.LakeCli
+
+end -- public section

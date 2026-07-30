@@ -1,11 +1,22 @@
 /-
+Copyright (c) 2026 Jacob Reinhold. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Jacob Reinhold
+-/
+module
+
+public import LakeWorkspace.Planner
+public import LakeWorkspace.Report
+
+/-!
 The executor: runs plan steps.
 
 Owns the single Lake subprocess, transactional generated-file installation,
 and exit-code aggregation. It has no knowledge of manifests, members, or
 dependency semantics — a `PlanStep` is self-contained.
 -/
-import LakeWorkspace.Planner
+
+public section
 
 namespace LakeWorkspace.Executor
 
@@ -56,30 +67,106 @@ def verifyFiles (root : FilePath) (files : Array (FilePath × String)) : IO UInt
       IO.eprintln s!"  {s}"
     return 1
 
-/-- Run the pinned `lake` executable once, inheriting stdio. -/
-def runLake (root : FilePath) (args : Array String) : IO UInt32 := do
-  IO.println s!"+ lake {" ".intercalate args.toList}"
-  let child ← IO.Process.spawn {
-    cmd := "lake"
-    args := args
-    cwd := some root
-    stdin := .inherit
-    stdout := .inherit
-    stderr := .inherit
-  }
-  child.wait
+/-- Run the pinned `lake` executable once, inheriting stdio. When
+    `capture` is set, output is captured and forwarded to stderr instead, so
+    stdout stays clean for machine-readable reports. -/
+def runLake (root : FilePath) (args : Array String) (capture : Bool := false) : IO UInt32 := do
+  IO.eprintln s!"+ lake {" ".intercalate args.toList}"
+  if capture then
+    let out ← IO.Process.output { cmd := "lake", args := args, cwd := some root }
+    if !out.stdout.isEmpty then IO.eprint out.stdout
+    if !out.stderr.isEmpty then IO.eprint out.stderr
+    return out.exitCode
+  else
+    let child ← IO.Process.spawn {
+      cmd := "lake"
+      args := args
+      cwd := some root
+      stdin := .inherit
+      stdout := .inherit
+      stderr := .inherit
+    }
+    child.wait
 
-def runStep (root : FilePath) : PlanStep → IO UInt32
-  | .installFiles files => installFiles root files
-  | .verifyFiles files => verifyFiles root files
-  | .runLake args => runLake root args
+/-- Maximum number of driver processes run concurrently (default inside;
+    no CLI flag until a caller needs one). -/
+def driverJobs : Nat := 4
 
-/-- Execute steps in order; stop at the first failure and return its code. -/
-def execute (plan : BuildPlan) : IO UInt32 := do
+/-- Run one driver, capturing output. Driver failure is data, never an
+    exception. -/
+def runOneDriver (root : FilePath) (cliArgs : Array String) (d : ResolvedDriver) :
+    IO DriverResult := do
+  let start ← IO.monoMsNow
+  let args := d.spec.args ++ cliArgs
+  let (exitCode, output) ← match d.targetKind with
+    | .lib =>
+      -- the preceding build step succeeded, which is the whole test
+      pure (0, "")
+    | .exe =>
+      let exe := root / d.relDir / ".lake/build/bin" / d.spec.target
+      try
+        let out ← IO.Process.output { cmd := exe.toString, args := args }
+        pure (out.exitCode, out.stdout ++ out.stderr)
+      catch e =>
+        pure (1, s!"failed to run {exe.toString}: {e}")
+    | .script =>
+      try
+        let out ← IO.Process.output {
+          cmd := "lake"
+          args := #["script", "run", s!"{d.pkg}/{d.spec.target}"] ++ args
+          cwd := some root }
+        pure (out.exitCode, out.stdout ++ out.stderr)
+      catch e =>
+        pure (1, s!"failed to run lake script: {e}")
+  let durationMs := (← IO.monoMsNow) - start
+  return { pkg := d.pkg, kind := d.spec.kind, target := d.spec.target,
+           targetKind := d.targetKind, exitCode, durationMs, output }
+
+/-- Run drivers with bounded parallelism (waves of `driverJobs`), preserving
+    selection order in the report. -/
+def runDrivers (root : FilePath) (drivers : Array ResolvedDriver) (cliArgs : Array String) :
+    IO Report := do
+  let kind := drivers[0]?.map (·.spec.kind) |>.getD "test"
+  let mut results : Array DriverResult := #[]
+  let mut i := 0
+  while i < drivers.size do
+    let wave := drivers.extract i (i + driverJobs)
+    let tasks ← wave.mapM fun d => IO.asTask (runOneDriver root cliArgs d)
+    for t in tasks do
+      let r ← IO.wait t
+      match r with
+      | .ok res => results := results.push res
+      | .error e =>
+        let res : DriverResult :=
+          { pkg := "?", kind := kind, target := "?", targetKind := .script,
+            exitCode := 1, durationMs := 0, output := toString e }
+        results := results.push res
+    i := i + driverJobs
+  return { kind, results }
+
+def runStep (root : FilePath) (capture : Bool) : PlanStep → IO (UInt32 × Option Report)
+  | .installFiles files => return (← installFiles root files, none)
+  | .verifyFiles files => return (← verifyFiles root files, none)
+  | .runLake args => return (← runLake root args capture, none)
+  | .runDrivers drivers cliArgs => do
+    let report ← runDrivers root drivers cliArgs
+    let failed := report.results.filter (·.exitCode != 0)
+    let code := failed[0]?.map (·.exitCode) |>.getD 0
+    return (code, some report)
+
+/-- Execute steps in order; stop at the first failure and return its code.
+    Driver steps always run every driver (aggregation, doc §7); their report
+    is returned to the caller. With `capture`, subprocess output goes to
+    stderr so stdout carries only the report. -/
+def execute (plan : BuildPlan) (capture : Bool := false) : IO (UInt32 × Option Report) := do
+  let mut report? : Option Report := none
   for step in plan.steps do
-    let code ← runStep plan.root step
+    let (code, r?) ← runStep plan.root capture step
+    if r?.isSome then report? := r?
     if code != 0 then
-      return code
-  return 0
+      return (code, report?)
+  return (0, report?)
 
 end LakeWorkspace.Executor
+
+end -- public section

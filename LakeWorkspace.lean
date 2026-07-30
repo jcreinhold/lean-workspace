@@ -6,10 +6,17 @@ Clients use exactly these operations. Successful construction of a
 modules `LakeWorkspace.{Toml,Workspace,Selection,Planner,Executor,Backend.*}`
 are implementation details and may change without notice.
 -/
-import LakeWorkspace.Workspace
-import LakeWorkspace.Selection
-import LakeWorkspace.Planner
-import LakeWorkspace.Executor
+
+module
+
+public import LakeWorkspace.Workspace
+public import LakeWorkspace.Selection
+public import LakeWorkspace.Planner
+public import LakeWorkspace.Executor
+public import LakeWorkspace.Report
+import LakeWorkspace.Backend.LakeCli
+
+public section
 
 namespace LakeWorkspace
 
@@ -28,9 +35,10 @@ def plan (workspace : Workspace) (selection : Selection) (action : Action) :
   Planner.plan workspace selection action
 
 /-- Execute a plan: the single Lake subprocess, transactional installs,
-    exit-code aggregation. -/
-def execute (plan : BuildPlan) : IO UInt32 :=
-  Executor.execute plan
+    exit-code aggregation. Driver steps produce a combined report. With
+    `capture`, subprocess output goes to stderr so stdout stays parseable. -/
+def execute (plan : BuildPlan) (capture : Bool := false) : IO (UInt32 × Option Report) :=
+  Executor.execute plan capture
 
 /-- `lakew check`: regenerate all generated files in memory and diff against
     what is on disk. Empty array = up to date. -/
@@ -47,3 +55,5 @@ def staleFiles (ws : Workspace) : IO (Array String) := do
   return stale
 
 end LakeWorkspace
+
+end -- public section

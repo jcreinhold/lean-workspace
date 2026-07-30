@@ -54,6 +54,7 @@ private structure CliOpts where
   targets : Array String := #[]
   changed : Option (Option String) := none
   all : Bool := false
+  writeDeps : Bool := false
   passthrough : Array String := #[]
   deriving Inhabited
 
@@ -81,6 +82,7 @@ private def parseArgs (args : List String) : Except String CliOpts := Id.run do
         | "--locked" => o := { o with locked := true }
         | "--offline" => o := { o with offline := true }
         | "--frozen" => o := { o with locked := true, offline := true }
+        | "--write-deps" => o := { o with writeDeps := true }
         | "--all" => o := { o with all := true }
         | "-p" | "--package" =>
           match rest with
@@ -123,12 +125,15 @@ private def findRoot (start : FilePath) : IO (Option FilePath) := do
 private def printDiags (ds : Diagnostics) : IO Unit :=
   IO.eprintln (Diagnostics.render ds)
 
+private def findWsRoot (o : CliOpts) : IO (Option FilePath) := do
+  let cwd ← IO.currentDir
+  match o.root with
+  | some r => pure (some r)
+  | none => findRoot cwd
+
 /-- Locate the root and load the workspace; on failure print and exit 1. -/
 private def loadWs (o : CliOpts) : IO (Option Workspace) := do
-  let cwd ← IO.currentDir
-  let root? ← match o.root with
-    | some r => pure (some r)
-    | none => findRoot cwd
+  let root? ← findWsRoot o
   match root? with
   | none =>
     IO.eprintln "error: no lean-workspace.toml found at or above the current directory"
@@ -161,9 +166,28 @@ private def runPlanned (o : CliOpts) (p : BuildPlan) : IO UInt32 := do
     else
       IO.println (Planner.describe p)
     return 0
-  LakeWorkspace.execute p
+  for note in p.notes do
+    IO.eprintln s!"note: {note}"
+  let (code, report?) ← LakeWorkspace.execute p (capture := o.json)
+  if let some r := report? then
+    if o.json then
+      IO.println (Json.pretty (Report.toJson r))
+    else
+      IO.println (Report.renderText r)
+  return code
 
 private def cmdSync (o : CliOpts) : IO UInt32 := do
+  if o.writeDeps then
+    match (← findWsRoot o) with
+    | none =>
+      IO.eprintln "error: no lean-workspace.toml found at or above the current directory"
+      return 1
+    | some root =>
+      match (← Workspace.alignDepsWithCentral root) with
+      | .error ds => printDiags ds; return 1
+      | .ok edited =>
+        for f in edited do
+          IO.println s!"aligned {f.toString}"
   let some ws ← loadWs o | return 1
   let emptySel : Selection := { packages := #[], targets := #[], explanations := #[] }
   match LakeWorkspace.plan ws emptySel (.sync o.locked o.offline) with
@@ -237,6 +261,8 @@ def main (args : List String) : IO UInt32 := do
       | "check" => cmdCheck o
       | "build" => cmdBuildLike o fun _ => .build o.passthrough
       | "clean" => cmdBuildLike o fun _ => .clean
+      | "test" => cmdBuildLike o fun _ => .test o.passthrough
+      | "lint" => cmdBuildLike o fun _ => .lint o.passthrough
       | "graph" => cmdGraph o
       | "metadata" => cmdMetadata o
       | _ =>

@@ -1,4 +1,14 @@
 /-
+Copyright (c) 2026 Jacob Reinhold. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Jacob Reinhold
+-/
+
+module
+
+public import LakeWorkspace.Workspace
+
+/-!
 Package and target selection.
 
 Pure: given a `Workspace` and a `SelectionQuery` (whose `changedPaths`, if
@@ -7,7 +17,8 @@ backend layer), produce a canonical, sorted, deduplicated set of
 package-qualified Lake targets plus an explanation trace (doc §8: "The
 selection result should explain itself").
 -/
-import LakeWorkspace.Workspace
+
+public section
 
 namespace LakeWorkspace
 
@@ -137,3 +148,5 @@ def renderExplanations (sel : Selection) : String := Id.run do
 end Selection
 
 end LakeWorkspace
+
+end -- public section

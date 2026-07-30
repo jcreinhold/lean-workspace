@@ -1,6 +1,16 @@
-/- Structured diagnostics shared by all `lakew` layers. -/
+/-
+Copyright (c) 2026 Jacob Reinhold. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Jacob Reinhold
+-/
+
+module
+
+/-! Structured diagnostics shared by all `lakew` layers. -/
 -- v4.33 removed the root `FilePath` alias; restore it for the whole package.
 export System (FilePath)
+
+public section
 
 namespace LakeWorkspace
 
@@ -40,3 +50,5 @@ def render (ds : Diagnostics) : String := Id.run do
 end Diagnostics
 
 end LakeWorkspace
+
+end -- public section

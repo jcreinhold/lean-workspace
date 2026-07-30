@@ -1,4 +1,12 @@
 /-
+Copyright (c) 2026 Jacob Reinhold. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Jacob Reinhold
+-/
+
+module
+
+/-!
 A minimal TOML reader, scoped to the `lean-workspace.toml` manifest schema.
 
 Supported: `[section]` and dotted `[a.b.c]` headers, `key = value` pairs with
@@ -8,6 +16,8 @@ workspace manifest schema is the only caller, and the parser is private to
 the workspace layer. If the schema ever outgrows it, swap the internals; the
 `Table` query interface is the stable surface.
 -/
+public section
+
 namespace LakeWorkspace.Toml
 
 inductive Value where
@@ -202,3 +212,5 @@ partial def parse (content : String) : Except String Table := do
   return t
 
 end LakeWorkspace.Toml
+
+end -- public section

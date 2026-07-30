@@ -1,4 +1,15 @@
 /-
+Copyright (c) 2026 Jacob Reinhold. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Jacob Reinhold
+-/
+
+module
+
+import LakeWorkspace.Toml
+public import LakeWorkspace.Diagnostics
+
+/-!
 The workspace model: manifest parsing, member discovery, validation,
 resolution conflict detection, and the module-owner index.
 
@@ -11,8 +22,8 @@ acyclic member dependency graph, a single canonical source per external
 package name, and (with default policy) that every cross-package import is a
 declared direct dependency.
 -/
-import LakeWorkspace.Toml
-import LakeWorkspace.Diagnostics
+
+public section
 
 namespace LakeWorkspace
 
@@ -32,6 +43,26 @@ structure RequireDecl where
   src : RequireSrc
   deriving Repr, BEq, Inhabited
 
+inductive TargetKind where
+  | script | exe | lib
+  deriving Repr, BEq, Inhabited
+
+/-- A test or lint driver discovered in a member's lakefile. Mirrors Lake's
+    `Package.test`/`Package.lint` resolution: a script (run via
+    `lake script run pkg/name`), an executable (built, then run), or a
+    library (built only — test drivers only). Verified against Lake
+    v4.33.0-rc1 (`Lake/CLI/Actions.lean`). -/
+structure DriverSpec where
+  /-- `test` or `lint`. -/
+  kind : String
+  /-- Driver name, possibly `otherpkg/name`-qualified (Lake syntax). -/
+  target : String
+  args : Array String := #[]
+  deriving Repr, BEq, Inhabited
+
+def DriverSpec.withArgs (d : DriverSpec) (args : Array String) : DriverSpec :=
+  { d with args := d.args ++ args }
+
 structure MemberPkg where
   name : String
   /-- Directory of the member, relative to the workspace root. -/
@@ -43,7 +74,17 @@ structure MemberPkg where
   modules : Array String := #[]
   /-- Contents of the member's own `lean-toolchain`, if it has one. -/
   toolchain : Option String := none
+  /-- Declared `script`/`lean_exe`/`lean_lib` target names and kinds. -/
+  targets : Array (String × TargetKind) := #[]
+  testDriver : Option DriverSpec := none
+  lintDriver : Option DriverSpec := none
   deriving Repr, Inhabited
+
+/-- A canonical external dependency declared centrally in `[deps.<name>]`. -/
+structure CentralDep where
+  name : String
+  src : RequireSrc
+  deriving Repr, BEq, Inhabited
 
 structure WorkspaceConfig where
   /-- Name of the generated virtual root package. -/
@@ -58,6 +99,10 @@ structure WorkspaceConfig where
   uniqueModuleRoots : Bool := true
   requireDirectImportEdges : Bool := true
   memberToolchains : String := "must-match-root"
+  /-- Central dependency declarations from `[deps.<name>]` (the
+      `[workspace.dependencies]` analog): the canonical source every member's
+      `require <name>` must match exactly. -/
+  deps : Array CentralDep := #[]
   deriving Repr, Inhabited
 
 /-- An external (non-member) dependency requirement, as declared by one member. -/
@@ -174,23 +219,36 @@ private partial def tokenize (text : String) : Array Tok := Id.run do
       i := i + 1
   return out
 
-/-- Extract the package name and `require` declarations from lakefile tokens.
-    Unparseable `require` occurrences produce warnings, not failures.
+/-- What `scanLakefile` extracts from a member `lakefile.lean`. -/
+structure LakefileScan where
+  pkgName : Option String := none
+  requires : Array RequireDecl := #[]
+  /-- Declared `script`/`lean_exe`/`lean_lib` names and kinds. -/
+  targets : Array (String × TargetKind) := #[]
+  testDriver : Option DriverSpec := none
+  lintDriver : Option DriverSpec := none
+  deriving Repr, Inhabited
+
+/-- Extract the package name, `require` declarations, target declarations and
+    test/lint drivers from lakefile tokens. Unparseable `require` occurrences
+    produce warnings, not failures.
     TODO: parse and compare `with` configuration options (currently ignored;
     conflicting options across members must become an error). -/
 private def scanLakefile (toks : Array Tok) (origin : FilePath) :
-    Diagnostics × Option String × Array RequireDecl := Id.run do
+    Diagnostics × LakefileScan := Id.run do
   let mut diags : Diagnostics := #[]
-  let mut pkgName : Option String := none
-  let mut requires : Array RequireDecl := #[]
+  let mut scan : LakefileScan := {}
+  let mut taggedTest : Option String := none
+  let mut taggedLint : Option String := none
   let mut i := 0
   let warn (msg : String) : Diagnostics := Diagnostics.warning s!"{origin.toString}: {msg}"
+  let tokIs (t : Tok) (s : String) : Bool := t == .ident s
   while i < toks.size do
     match toks[i]! with
     | .ident "package" =>
       match toks[i + 1]? with
       | some (.ident n) =>
-        if pkgName.isNone then pkgName := some n
+        if scan.pkgName.isNone then scan := { scan with pkgName := some n }
         i := i + 2
       | _ =>
         diags := diags ++ warn "could not parse `package` name"
@@ -208,11 +266,109 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
           | _, _ => some { name, src := .git url none }
         | _ => none
       match parsed with
-      | some decl => requires := requires.push decl
+      | some decl => scan := { scan with requires := scan.requires.push decl }
       | none => diags := diags ++ warn "could not parse a `require` declaration"
       i := i + 1
+    | .at =>
+      -- possible @[test_driver] / @[lint_driver] tag before a target decl
+      match toks[i + 1]?, toks[i + 2]?, toks[i + 3]? with
+      | some (.sym '['), some (.ident attr), some (.sym ']') =>
+        if attr == "test_driver" || attr == "lint_driver" then
+          -- find the following target declaration
+          let mut j := i + 4
+          let mut found := false
+          while j < toks.size && j < i + 8 && !found do
+            match toks[j]! with
+            | .ident kw =>
+              if kw == "script" || kw == "lean_exe" || kw == "lean_lib" then
+                match toks[j + 1]? with
+                | some (.ident n) =>
+                  if attr == "test_driver" then taggedTest := some n else taggedLint := some n
+                  found := true
+                | _ => found := true
+            | _ => pure ()
+            j := j + 1
+        i := i + 1
+      | _, _, _ => i := i + 1
+    | .ident kw =>
+      if kw == "script" || kw == "lean_exe" || kw == "lean_lib" then
+        let kind := if kw == "script" then TargetKind.script
+          else if kw == "lean_exe" then TargetKind.exe else TargetKind.lib
+        match toks[i + 1]? with
+        | some (.ident n) =>
+          scan := { scan with targets := scan.targets.push (n, kind) }
+          i := i + 2
+        | _ =>
+          diags := diags ++ warn s!"could not parse `{kw}` declaration name"
+          i := i + 1
+      else if kw == "testDriver" || kw == "lintDriver" ||
+              kw == "testDriverArgs" || kw == "lintDriverArgs" then
+        -- config assignment `<key> := <value>`
+        match toks[i + 1]?, toks[i + 2]? with
+        | some (.sym ':'), some (.sym '=') =>
+          if kw == "testDriver" || kw == "lintDriver" then
+            match toks[i + 3]? with
+            | some (.str s) =>
+              let kind := if kw == "testDriver" then "test" else "lint"
+              let prevArgs := match (if kw == "testDriver" then scan.testDriver
+                  else scan.lintDriver) with
+                | some d => d.args
+                | none => #[]
+              let spec : DriverSpec := { kind, target := s, args := prevArgs }
+              if kw == "testDriver" then scan := { scan with testDriver := some spec }
+              else scan := { scan with lintDriver := some spec }
+              i := i + 4
+            | _ =>
+              diags := diags ++ warn s!"could not parse `{kw}` value"
+              i := i + 1
+          else
+            -- args: `#["a", "b"]`
+            match toks[i + 3]?, toks[i + 4]? with
+            | some (.sym '#'), some (.sym '[') =>
+              let mut j := i + 5
+              let mut args : Array String := #[]
+              let mut ok := true
+              while j < toks.size && ok do
+                match toks[j]! with
+                | .str s => args := args.push s; j := j + 1
+                | .sym ',' => j := j + 1
+                | .sym ']' => ok := false
+                | _ =>
+                  diags := diags ++ warn s!"could not parse `{kw}` array"
+                  ok := false
+              if kw == "testDriverArgs" then
+                scan := { scan with testDriver := (scan.testDriver.getD {
+                  kind := "test", target := "" }).withArgs args }
+              else
+                scan := { scan with lintDriver := (scan.lintDriver.getD {
+                  kind := "lint", target := "" }).withArgs args }
+              i := j + 1
+            | _, _ =>
+              diags := diags ++ warn s!"could not parse `{kw}` value"
+              i := i + 1
+        | _, _ => i := i + 1
+      else
+        i := i + 1
     | _ => i := i + 1
-  return (diags, pkgName, requires)
+  -- Fold tags into drivers (Lake forbids config+tag together; mirror as warning).
+  let testPh := scan.testDriver.getD { kind := "test", target := "" }
+  let lintPh := scan.lintDriver.getD { kind := "lint", target := "" }
+  if let some n := taggedTest then
+    if testPh.target.isEmpty then
+      scan := { scan with testDriver := some { testPh with target := n } }
+    else
+      diags := diags ++ warn "both `testDriver` config and `@[test_driver]` tag are set \
+        (Lake will reject this)"
+  if let some n := taggedLint then
+    if lintPh.target.isEmpty then
+      scan := { scan with lintDriver := some { lintPh with target := n } }
+    else
+      diags := diags ++ warn "both `lintDriver` config and `@[lint_driver]` tag are set \
+        (Lake will reject this)"
+  -- Args without a driver name are meaningless; drop the placeholder.
+  if scan.testDriver.any (·.target.isEmpty) then scan := { scan with testDriver := none }
+  if scan.lintDriver.any (·.target.isEmpty) then scan := { scan with lintDriver := none }
+  return (diags, scan)
 
 /-! ## Import scanning -/
 
@@ -312,9 +468,9 @@ private def loadMember (root relDir : FilePath) : IO (Diagnostics × Option Memb
     diags := diags ++ Diagnostics.warning s!"skipping `{relDir.toString}`: no lakefile.lean"
     return (diags, none)
   | some lakeText =>
-    let (scanDiags, name?, requires) := scanLakefile (tokenize lakeText) lakefile
+    let (scanDiags, scan) := scanLakefile (tokenize lakeText) lakefile
     diags := diags ++ scanDiags
-    match name? with
+    match scan.pkgName with
     | none =>
       diags := diags ++ Diagnostics.error s!"{lakefile.toString}: no `package` declaration found"
       return (diags, none)
@@ -324,24 +480,46 @@ private def loadMember (root relDir : FilePath) : IO (Diagnostics × Option Memb
         diags := diags ++ Diagnostics.warning s!"member `{name}` at {relDir.toString} has no Lean modules"
       let toolchain? := (← readOptionalFile (dir / "lean-toolchain")).map fun t => t.trimAscii.toString
       return (diags, some {
-        name, relDir, requires, moduleRoots := roots,
-        modules := modules.insertionSort (· < ·), toolchain := toolchain? })
+        name, relDir, requires := scan.requires, moduleRoots := roots,
+        modules := modules.insertionSort (· < ·), toolchain := toolchain?,
+        targets := scan.targets, testDriver := scan.testDriver,
+        lintDriver := scan.lintDriver })
 
 /-! ## Config parsing -/
 
-private def knownKeys (_t : Toml.Table) (groupNames : Array String) : Array String :=
+private def knownKeys (_t : Toml.Table) (groupNames depNames : Array String) : Array String :=
   #[ "workspace.members", "workspace.exclude", "workspace.default-members", "workspace.name"
    , "policy.single-package-version", "policy.unique-module-roots"
    , "policy.require-direct-import-edges", "policy.member-toolchains"
    , "policy.conflicting-package-options"
    , "cache.local", "cache.restore" ]
   ++ groupNames.map (s!"groups.{·}.members")
+  ++ depNames.flatMap fun d => #[s!"deps.{d}.git", s!"deps.{d}.rev", s!"deps.{d}.path"]
+
+/-- Parse one `[deps.<name>]` table: `git` + optional `rev`, or `path`. -/
+private def parseCentralDep (t : Toml.Table) (name : String) : Except Diagnostics CentralDep := do
+  let git? := t.getStr s!"deps.{name}.git"
+  let rev? := t.getStr s!"deps.{name}.rev"
+  let path? := t.getStr s!"deps.{name}.path"
+  match git?, path? with
+  | some _, some _ =>
+    .error (Diagnostics.error s!"[deps.{name}] sets both `git` and `path`; choose one")
+  | some url, none =>
+    .ok { name, src := .git url rev? }
+  | none, some dir =>
+    if rev?.isSome then
+      .error (Diagnostics.error s!"[deps.{name}] sets `rev` but no `git` url")
+    else
+      .ok { name, src := .path dir }
+  | none, none =>
+    .error (Diagnostics.error s!"[deps.{name}] must set `git` (optionally `rev`) or `path`")
 
 private def parseConfig (t : Toml.Table) : Diagnostics × WorkspaceConfig := Id.run do
   let mut diags : Diagnostics := #[]
   let groupNames := t.subsections "groups"
+  let depNames := t.subsections "deps"
   for k in t.keys do
-    if !(knownKeys t groupNames).contains k then
+    if !(knownKeys t groupNames depNames).contains k then
       diags := diags ++ Diagnostics.warning s!"lean-workspace.toml: ignoring unknown key `{k}`"
   let mut cfg : WorkspaceConfig := {}
   if let some n := t.getStr "workspace.name" then cfg := { cfg with name := n }
@@ -369,6 +547,10 @@ private def parseConfig (t : Toml.Table) : Diagnostics × WorkspaceConfig := Id.
     cfg := { cfg with requireDirectImportEdges := b }
   if let some m := t.getStr "policy.member-toolchains" then
     cfg := { cfg with memberToolchains := m }
+  for d in depNames do
+    match parseCentralDep t d with
+    | .ok cd => cfg := { cfg with deps := cfg.deps.push cd }
+    | .error ds => diags := diags ++ ds
   return (diags, cfg)
 
 /-! ## Validation -/
@@ -476,12 +658,24 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
     diags := diags ++ Diagnostics.error
       "package dependency cycle detected"
       #[String.intercalate " → " (cyc.reverse.map toString)]
-  -- 10. External dependency conflicts (one canonical source+revision per name)
+  -- 10. External dependency resolution: centrally declared names must match
+  -- [deps] exactly; the rest must agree across members.
   let mut externals : Array ExternalRequire := #[]
   for m in members do
     for r in m.requires do
       if !names.contains r.name then
-        externals := externals.push { name := r.name, src := r.src, requiredBy := m.name }
+        match config.deps.find? (·.name == r.name) with
+        | some cd =>
+          if cd.src != r.src then
+            diags := diags ++ Diagnostics.error
+              s!"member `{m.name}` requires `{r.name}` from a source that does not match \
+                 the workspace [deps] declaration"
+              #[ s!"{m.relDir.toString}/lakefile.lean:  {r.src.describe}"
+               , s!"lean-workspace.toml [deps.{cd.name}]:  {cd.src.describe}"
+               , s!"align the member with the central declaration \
+                  (or run `lakew sync --write-deps`)" ]
+        | none =>
+          externals := externals.push { name := r.name, src := r.src, requiredBy := m.name }
   let extNames := externals.map ExternalRequire.name |>.toList.eraseDups
   for n in extNames do
     let rs := externals.filter (·.name == n)
@@ -533,6 +727,111 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
     root, config, members, edges, externals, moduleOwners, toolchain
   }
 
+/-! ## Dependency alignment (`lakew sync --write-deps`) -/
+
+/-- Extract the package-name field (preserving any `«»` quoting) from a line
+    whose first token is `require`. -/
+private def requireNameField (line : String) : Option String := Id.run do
+  let t := line.trimAscii.toString
+  if !t.startsWith "require " then return none
+  let rest := (t.drop 8).toString
+  if rest.startsWith "«" then
+    let close := (rest.toList.drop 1).findIdx? (· == '»')
+    return close.map fun i => String.ofList (rest.toList.take (i + 2))
+  else
+    let name := String.ofList (rest.toList.takeWhile fun c =>
+      c.isAlphanum || c == '_' || c == '.' || c == '\'')
+    return if name.isEmpty then none else some name
+
+/-- Render the canonical single-line require for a central declaration,
+    preserving the original indentation and name spelling of `line`. -/
+private def renderAlignedRequire (line : String) (cd : CentralDep) : Option String := do
+  let nameField ← requireNameField line
+  let indent := String.ofList (line.toList.takeWhile Char.isWhitespace)
+  match cd.src with
+  | .path dir =>
+    some s!"{indent}require {nameField} from \"{dir.toString}\""
+  | .git url rev? =>
+    match rev? with
+    | some rev => some s!"{indent}require {nameField} from git \"{url}\" @ \"{rev}\""
+    | none => some s!"{indent}require {nameField} from git \"{url}\""
+
+/-- Rewrite member `require` declarations to match the central `[deps]`
+    declarations. Only canonical single-line requires in `lakefile.lean` are
+    rewritten; anything else is an error naming the file and the edit to make
+    by hand. Returns the files that were modified. -/
+def alignDepsWithCentral (root : FilePath) : IO (Except Diagnostics (Array FilePath)) := do
+  let manifestText? ← readOptionalFile (root / "lean-workspace.toml")
+  let manifestText ← match manifestText? with
+    | none => return .error (Diagnostics.error s!"no lean-workspace.toml found at {root.toString}")
+    | some t => pure t
+  let table ← match Toml.parse manifestText with
+    | .error e => return .error (Diagnostics.error s!"lean-workspace.toml: {e}")
+    | .ok t => pure t
+  let (cfgDiags, config) := parseConfig table
+  if cfgDiags.hasErrors then
+    return .error cfgDiags
+  if config.deps.isEmpty then
+    return .ok #[]
+  let mut relDirs : Array FilePath := #[]
+  for pat in config.memberPatterns do
+    relDirs := relDirs ++ (← expandPattern root pat)
+  relDirs := relDirs.filter fun d => !config.excludePatterns.any (matchPattern · d)
+  let mut diags : Diagnostics := #[]
+  let mut edited : Array FilePath := #[]
+  for rel in relDirs do
+    let lakefile := root / rel / "lakefile.lean"
+    if let some text ← readOptionalFile lakefile then
+      let mut out : Array String := #[]
+      let mut changed := false
+      let mut lineNo := 0
+      for line in text.splitOn "\n" do
+        lineNo := lineNo + 1
+        match requireNameField line with
+        | none => out := out.push line
+        | some nameField =>
+          -- strip «» quoting to get the package name
+          let name :=
+            if nameField.startsWith "«" && nameField.endsWith "»" then
+              String.ofList (nameField.toList.drop 1 |>.dropLast)
+            else nameField
+          match config.deps.find? (·.name == name) with
+          | none => out := out.push line -- not centrally managed; leave alone
+          | some cd =>
+            let toks := tokenize line
+            let current? : Option RequireSrc := match toks.toList with
+              | [.ident "require", .ident _, .ident "from", .str dir] =>
+                some (.path dir)
+              | [.ident "require", .ident _, .ident "from", .ident "git", .str url] =>
+                some (.git url none)
+              | [.ident "require", .ident _, .ident "from", .ident "git", .str url, .at, .str rev] =>
+                some (.git url (some rev))
+              | _ => none
+            match current? with
+            | none =>
+              diags := diags ++ Diagnostics.error
+                s!"{lakefile.toString}:{lineNo}: cannot rewrite this `require {nameField}` \
+                   automatically (multi-line or non-canonical form)"
+                #[s!"edit it by hand to match [deps.{cd.name}]: {cd.src.describe}"]
+              out := out.push line
+            | some current =>
+              if current == cd.src then
+                out := out.push line
+              else
+                match renderAlignedRequire line cd with
+                | some newLine =>
+                  out := out.push newLine
+                  changed := true
+                | none => out := out.push line
+      if changed then
+        IO.FS.writeFile lakefile ("\n".intercalate out.toList)
+        edited := edited.push lakefile
+  if diags.hasErrors then
+    return .error diags
+  return .ok edited
+
 end Workspace
 
 end LakeWorkspace
+
+end -- public section

@@ -1,4 +1,11 @@
 /-
+Copyright (c) 2026 Jacob Reinhold. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Jacob Reinhold
+-/
+module
+
+/-!
 A minimal JSON writer.
 
 `lakew` only ever *writes* JSON (generated `.lake/package-overrides.json`,
@@ -6,6 +13,8 @@ A minimal JSON writer.
 internal writer avoids importing `Lean.Data.Json` (and transitively a large
 part of the Lean compiler) into the executable.
 -/
+public section
+
 namespace LakeWorkspace
 
 inductive Json where
@@ -77,3 +86,5 @@ def pretty (j : Json) : String := renderPretty 0 j
 end Json
 
 end LakeWorkspace
+
+end -- public section
