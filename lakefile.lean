@@ -71,6 +71,11 @@ lean_exe «suite-options-policy» where
 the default `lake test` set, run via `lake test -- --all` or directly. Its
 gates are wall-clock ratios meant for a human reading `tests/bench.md`; CI
 builds it but does not time it. -/
+lean_exe «suite-toml-lakefiles» where
+  srcDir := "tests"
+  root := `Suites.TomlLakefiles
+  supportInterpreter := true
+
 lean_exe «suite-bench» where
   srcDir := "tests"
   root := `Suites.Bench

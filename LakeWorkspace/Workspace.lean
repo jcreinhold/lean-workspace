@@ -48,6 +48,19 @@ inductive TargetKind where
   | script | exe | lib
   deriving Repr, BEq, Inhabited
 
+/-- Which lakefile format a member carries. Lake allows exactly one of
+    `lakefile.lean` / `lakefile.toml` per package; `loadMember` enforces the
+    same rule. The volatile parsing decision stays inside `scanLakefile` /
+    `scanLakefileToml` — this tag exists so diagnostics name the right file
+    and `--write-deps` can decline TOML rewrites. -/
+inductive LakefileFormat where
+  | lean | toml
+  deriving Repr, BEq, Inhabited
+
+def LakefileFormat.fileName : LakefileFormat → String
+  | .lean => "lakefile.lean"
+  | .toml => "lakefile.toml"
+
 /-- A test or lint driver discovered in a member's lakefile. Mirrors Lake's
     `Package.test`/`Package.lint` resolution: a script (run via
     `lake script run pkg/name`), an executable (built, then run), or a
@@ -86,6 +99,7 @@ structure MemberPkg where
   declaredOptions : Array (String × String) := #[]
   /-- Whether the lakefile mentions `leanOptions`/`moreLeanOptions` at all. -/
   hasOptionAssignments : Bool := false
+  lakefileFormat : LakefileFormat := .lean
   deriving Repr, Inhabited
 
 /-- A canonical external dependency declared centrally in `[deps.<name>]`. -/
@@ -279,7 +293,10 @@ private partial def tokenize (text : String) : Array Tok := Id.run do
       i := i + 1
   return out
 
-/-- What `scanLakefile` extracts from a member `lakefile.lean`. -/
+/-- What the lakefile scanners extract from a member's lakefile. Two
+    producers with identical output: `scanLakefile` (`lakefile.lean`,
+    token-based) and `scanLakefileToml` (`lakefile.toml`, over Lake's own
+    TOML reader) — nothing downstream learns that two formats exist. -/
 structure LakefileScan where
   pkgName : Option String := none
   requires : Array RequireDecl := #[]
@@ -471,6 +488,76 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
   if scan.lintDriver.any (·.target.isEmpty) then scan := { scan with lintDriver := none }
   return (diags, scan)
 
+/-- Extract the package name, requires, targets and drivers from a parsed
+    `lakefile.toml`: the TOML producer of `LakefileScan`, mirroring
+    `scanLakefile`. TOML lakefiles cannot declare scripts (Lake itself does
+    not support them), so their drivers are always exe/lib targets; and
+    every option value is a literal, so the `[options]` policy verifies TOML
+    members exactly — the "verify manually" warning branch never fires for
+    them. Divergence to note: `defaultTargets` and `globs` restrict what
+    Lake *builds*, but our module index comes from the on-disk walk
+    (`memberModules`), which stays authoritative.
+    -/
+private def scanLakefileToml (t : Toml.Table) (origin : FilePath) :
+    Diagnostics × LakefileScan := Id.run do
+  let mut diags : Diagnostics := #[]
+  let warn (msg : String) : Diagnostics := Diagnostics.warning s!"{origin.toString}: {msg}"
+  let mut scan : LakefileScan := {}
+  scan := { scan with pkgName := t.getStr "name" }
+  for rt in t.tables "require" do
+    match rt.getStr "name" with
+    | none => diags := diags ++ warn "a [[require]] block is missing `name`"
+    | some name =>
+      match rt.getStr "git", rt.getStr "path" with
+      | some _, some _ =>
+        diags := diags ++ warn s!"[[require]] `{name}` sets both `git` and `path`"
+      | some url, none =>
+        let decl : RequireDecl := { name, src := .git url (rt.getStr "rev") }
+        scan := { scan with requires := scan.requires.push decl }
+      | none, some dir =>
+        let decl : RequireDecl := { name, src := .path dir }
+        scan := { scan with requires := scan.requires.push decl }
+      | none, none =>
+        diags := diags ++ warn s!"[[require]] `{name}` sets neither `git` nor `path`"
+  for lt in t.tables "lean_lib" do
+    match lt.getStr "name" with
+    | some n => scan := { scan with targets := scan.targets.push (n, .lib) }
+    | none => diags := diags ++ warn "a [[lean_lib]] block is missing `name`"
+  for et in t.tables "lean_exe" do
+    match et.getStr "name" with
+    | some n => scan := { scan with targets := scan.targets.push (n, .exe) }
+    | none => diags := diags ++ warn "a [[lean_exe]] block is missing `name`"
+  if let some d := t.getStr "testDriver" then
+    scan := { scan with testDriver := some ({ kind := "test", target := d } : DriverSpec) }
+  if let some d := t.getStr "lintDriver" then
+    scan := { scan with lintDriver := some ({ kind := "lint", target := d } : DriverSpec) }
+  if let some args := t.getStrArray "testDriverArgs" then
+    scan := { scan with testDriver := (scan.testDriver.getD {
+      kind := "test", target := "" }).withArgs args }
+  if let some args := t.getStrArray "lintDriverArgs" then
+    scan := { scan with lintDriver := (scan.lintDriver.getD {
+      kind := "lint", target := "" }).withArgs args }
+  -- Args without a driver name are meaningless; drop the placeholder.
+  if scan.testDriver.any (·.target.isEmpty) then scan := { scan with testDriver := none }
+  if scan.lintDriver.any (·.target.isEmpty) then scan := { scan with lintDriver := none }
+  -- Lean options: the package's `[leanOptions]` table plus each target's
+  -- inline `leanOptions`, all literal (TOML has no composition escape hatch).
+  let optEntries (tab : Toml.Table) : Array (String × String) :=
+    tab.entries.filterMap fun (k, v) =>
+      if k.startsWith "leanOptions." then
+        let name := (k.drop "leanOptions.".length).toString
+        match v with
+        | .boolean b => some (name, toString b)
+        | .int n => some (name, toString n)
+        | .str s => some (name, s!"\"{s}\"")
+        | .arr _ => none
+      else none
+  let declared := optEntries t
+    ++ (t.tables "lean_lib").flatMap optEntries
+    ++ (t.tables "lean_exe").flatMap optEntries
+  scan := { scan with declaredOptions := declared, hasOptionAssignments := !declared.isEmpty }
+  return (diags, scan)
+
 /-! ## Import scanning -/
 
 /-- Parse the leading `import` block of a Lean source file. -/
@@ -587,31 +674,47 @@ private def readOptionalFile (p : FilePath) : IO (Option String) :=
 
 private def loadMember (root relDir : FilePath) : IO (Diagnostics × Option MemberPkg) := do
   let dir := root / relDir
-  let lakefile := dir / "lakefile.lean"
   let mut diags : Diagnostics := #[]
-  let lakeText? ← readOptionalFile lakefile
-  match lakeText? with
-  | none =>
-    diags := diags ++ Diagnostics.warning s!"skipping `{relDir.toString}`: no lakefile.lean"
+  -- Lake allows exactly one lakefile format per package; mirror that rule.
+  let hasLean ← (dir / "lakefile.lean").pathExists
+  let hasToml ← (dir / "lakefile.toml").pathExists
+  if hasLean && hasToml then
+    diags := diags ++ Diagnostics.error s!"{dir.toString}: both lakefile.lean and \
+      lakefile.toml exist (Lake allows exactly one per package)"
     return (diags, none)
-  | some lakeText =>
-    let (scanDiags, scan) := scanLakefile (tokenize lakeText) lakefile
-    diags := diags ++ scanDiags
-    match scan.pkgName with
-    | none =>
-      diags := diags ++ Diagnostics.error s!"{lakefile.toString}: no `package` declaration found"
-      return (diags, none)
-    | some name =>
-      let (roots, modules) ← scanModules dir
-      if roots.isEmpty then
-        diags := diags ++ Diagnostics.warning s!"member `{name}` at {relDir.toString} has no Lean modules"
-      let toolchain? := (← readOptionalFile (dir / "lean-toolchain")).map fun t => t.trimAscii.toString
-      return (diags, some {
-        name, relDir, requires := scan.requires, moduleRoots := roots,
-        modules := modules.insertionSort (· < ·), toolchain := toolchain?,
-        targets := scan.targets, testDriver := scan.testDriver,
-        lintDriver := scan.lintDriver, declaredOptions := scan.declaredOptions,
-        hasOptionAssignments := scan.hasOptionAssignments })
+  if !hasLean && !hasToml then
+    diags := diags ++ Diagnostics.warning
+      s!"skipping `{relDir.toString}`: no lakefile.lean or lakefile.toml"
+    return (diags, none)
+  let format := if hasToml then LakefileFormat.toml else LakefileFormat.lean
+  let lakefile := dir / format.fileName
+  let text ← IO.FS.readFile lakefile
+  let (scanDiags, scan) ← match format with
+    | .lean => pure (scanLakefile (tokenize text) lakefile)
+    | .toml =>
+      match (← Toml.parse text) with
+      | .error e =>
+        return (diags ++ Diagnostics.error s!"{lakefile.toString}: {e}", none)
+      | .ok table => pure (scanLakefileToml table lakefile)
+  diags := diags ++ scanDiags
+  match scan.pkgName with
+  | none =>
+    let what := match format with
+      | .lean => "no `package` declaration found"
+      | .toml => "no `name` key found"
+    diags := diags ++ Diagnostics.error s!"{lakefile.toString}: {what}"
+    return (diags, none)
+  | some name =>
+    let (roots, modules) ← scanModules dir
+    if roots.isEmpty then
+      diags := diags ++ Diagnostics.warning s!"member `{name}` at {relDir.toString} has no Lean modules"
+    let toolchain? := (← readOptionalFile (dir / "lean-toolchain")).map fun t => t.trimAscii.toString
+    return (diags, some {
+      name, relDir, requires := scan.requires, moduleRoots := roots,
+      modules := modules.insertionSort (· < ·), toolchain := toolchain?,
+      targets := scan.targets, testDriver := scan.testDriver,
+      lintDriver := scan.lintDriver, declaredOptions := scan.declaredOptions,
+      hasOptionAssignments := scan.hasOptionAssignments, lakefileFormat := format })
 
 /-! ## Config parsing -/
 
@@ -724,7 +827,7 @@ private def memberImportScan (root : FilePath) (ownerMap : Std.HashMap String St
                 diags := diags ++ Diagnostics.error
                   s!"module `{mod}` in package `{m.name}` imports `{imp}` from package \
                      `{owner}`, but `{m.name}` does not declare a direct dependency on `{owner}`"
-                  #[s!"add `require {owner} from \"...\"` to {m.relDir.toString}/lakefile.lean"]
+                  #[s!"add `require {owner} from \"...\"` to {m.relDir.toString}/{m.lakefileFormat.fileName}"]
               if isTestMember owner && !isTestMember m.name then
                 diags := diags ++ Diagnostics.error
                   s!"production package `{m.name}` imports `{imp}` from test/benchmark \
@@ -860,7 +963,7 @@ def load (root : FilePath) (loadModuleImports : Bool := true) (bench : Bool := f
             diags := diags ++ Diagnostics.error
               s!"member `{m.name}` requires `{r.name}` from a source that does not match \
                  the workspace [deps] declaration"
-              #[ s!"{m.relDir.toString}/lakefile.lean:  {r.src.describe}"
+              #[ s!"{m.relDir.toString}/{m.lakefileFormat.fileName}:  {r.src.describe}"
                , s!"lean-workspace.toml [deps.{cd.name}]:  {cd.src.describe}"
                , s!"align the member with the central declaration \
                   (or run `lakew sync --write-deps`)" ]
@@ -905,12 +1008,15 @@ def load (root : FilePath) (loadModuleImports : Bool := true) (bench : Bool := f
           diags := diags ++ Diagnostics.error
             s!"member `{m.name}` sets `{optName}` to {v}, but the workspace [options] \
                policy requires {optVal}"
-            #[s!"{m.relDir.toString}/lakefile.lean", s!"lean-workspace.toml [options]"]
+            #[s!"{m.relDir.toString}/{m.lakefileFormat.fileName}", s!"lean-workspace.toml [options]"]
       | none =>
         if !m.hasOptionAssignments then
+          let hint := match m.lakefileFormat with
+            | .lean => s!"add `⟨`{optName}, {optVal}⟩` to its leanOptions/moreLeanOptions"
+            | .toml => s!"add `{optName} = {optVal}` to its [leanOptions]"
           diags := diags ++ Diagnostics.error
             s!"member `{m.name}` does not set required workspace option `{optName}`"
-            #[s!"add `⟨`{optName}, {optVal}⟩` to its leanOptions/moreLeanOptions"]
+            #[hint]
         else
           diags := diags ++ Diagnostics.warning
             s!"could not verify `{optName}` in `{m.name}` (options composed beyond \
@@ -959,7 +1065,10 @@ private def renderAlignedRequire (line : String) (cd : CentralDep) : Option Stri
 /-- Rewrite member `require` declarations to match the central `[deps]`
     declarations. Only canonical single-line requires in `lakefile.lean` are
     rewritten; anything else is an error naming the file and the edit to make
-    by hand. Returns the files that were modified. -/
+    by hand. `lakefile.toml` members are never rewritten (rewriting Lean
+    lakefiles was the milestone-2 scope): a TOML require that disagrees with
+    the central declaration is an error naming the manual edit. Returns the
+    files that were modified. -/
 def alignDepsWithCentral (root : FilePath) : IO (Except Diagnostics (Array FilePath)) := do
   let manifestText? ← readOptionalFile (root / "lean-workspace.toml")
   let manifestText ← match manifestText? with
@@ -981,6 +1090,20 @@ def alignDepsWithCentral (root : FilePath) : IO (Except Diagnostics (Array FileP
   let mut edited : Array FilePath := #[]
   for rel in relDirs do
     let lakefile := root / rel / "lakefile.lean"
+    let tomlLakefile := root / rel / "lakefile.toml"
+    if !(← lakefile.pathExists) && (← tomlLakefile.pathExists) then
+      -- TOML members: never rewritten; a central mismatch names the manual edit.
+      match (← Toml.parse (← IO.FS.readFile tomlLakefile)) with
+      | .error e => diags := diags ++ Diagnostics.error s!"{tomlLakefile.toString}: {e}"
+      | .ok tab =>
+        let (_, scan) := scanLakefileToml tab tomlLakefile
+        for r in scan.requires do
+          if let some cd := config.deps.find? (·.name == r.name) then
+            if r.src != cd.src then
+              diags := diags ++ Diagnostics.error
+                s!"{tomlLakefile.toString}: `[[require]] {r.name}` does not match [deps.{cd.name}] \
+                   and TOML lakefiles are not rewritten automatically"
+                #[s!"edit it by hand: {cd.src.describe}"]
     if let some text ← readOptionalFile lakefile then
       let mut out : Array String := #[]
       let mut changed := false

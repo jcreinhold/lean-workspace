@@ -76,8 +76,10 @@ def moduleImportsOf (sizes : Array Nat) (i j : Nat) : Array String := Id.run do
       out := out.push s!"Mem{i}.M{(j * 11 + t) % (j - 1)}"
   return out
 
-/-- Write one synthetic workspace of `size` under `dir`. -/
-def generate (dir : System.FilePath) (size : Size) : IO Unit := do
+/-- Write one synthetic workspace of `size` under `dir`. With `tomlMixed`,
+odd-numbered members carry a `lakefile.toml` instead of a `lakefile.lean`
+(the PLAN-02 measurement: mixed members vs Lean-only on the same shape). -/
+def generate (dir : System.FilePath) (size : Size) (tomlMixed : Bool := false) : IO Unit := do
   IO.FS.createDirAll (dir / "packages")
   IO.FS.writeFile (dir / "lean-toolchain") "leanprover/lean4:v4.33.0-rc1\n"
   IO.FS.writeFile (dir / "lean-workspace.toml")
@@ -88,10 +90,17 @@ def generate (dir : System.FilePath) (size : Size) : IO Unit := do
     let root := s!"Mem{i}"
     let pkg := dir / "packages" / name
     IO.FS.createDirAll (pkg / root)
-    let mut lakefile := s!"import Lake\nopen Lake DSL\n\npackage {name} where\n"
-    for r in memberRequires i do
-      lakefile := lakefile ++ s!"\nrequire mem{r} from \"../mem{r}\""
-    IO.FS.writeFile (pkg / "lakefile.lean") (lakefile ++ "\n")
+    if tomlMixed && i % 2 == 1 then
+      let mut lakefile := s!"name = \"{name}\"\n"
+      for r in memberRequires i do
+        lakefile := lakefile ++ s!"\n[[require]]\nname = \"mem{r}\"\npath = \"../mem{r}\"\n"
+      lakefile := lakefile ++ s!"\n[[lean_lib]]\nname = \"{root}\"\n"
+      IO.FS.writeFile (pkg / "lakefile.toml") lakefile
+    else
+      let mut lakefile := s!"import Lake\nopen Lake DSL\n\npackage {name} where\n"
+      for r in memberRequires i do
+        lakefile := lakefile ++ s!"\nrequire mem{r} from \"../mem{r}\""
+      IO.FS.writeFile (pkg / "lakefile.lean") (lakefile ++ "\n")
     for j in [0:nModules] do
       let imps := moduleImportsOf size.memberModules i j
       let body := (imps.map (s!"import {·}") |>.toList) ++ ["", s!"def {root}.M{j}.x : Nat := {j}"]
@@ -154,11 +163,16 @@ def collect (root : System.FilePath) : IO Run := do
   let spawnMs := ((← IO.monoNanosNow) - tSpawn) / 1000000
   let sizes := #[small, medium, mathlib]
   let records ← withTempDir fun tmp => do
-    sizes.mapM fun size => do
+    let leanOnly ← sizes.mapM fun size => do
       let dir := tmp / size.name
       generate dir size
       let (graph, full) ← measure lakew dir
       pure ⟨size, graph, full⟩
+    -- PLAN-02: the same medium shape with half the members TOML-carried.
+    let mixedDir := tmp / "medium-mixed"
+    generate mixedDir medium (tomlMixed := true)
+    let (graph, full) ← measure lakew mixedDir
+    pure (leanOnly.push ⟨{ medium with name := "medium-mixed" }, graph, full⟩)
   return { records, spawnMs }
 
 def cases (run : Run) : Array Case :=
@@ -185,7 +199,13 @@ def cases (run : Run) : Array Case :=
       let budget := 4 * max 1 run.spawnMs
       ensure (phaseMs (recordAt "mathlib").graph "total" ≤ budget)
         s!"graph total {(phaseMs (recordAt "mathlib").graph "total")} ms exceeds 4× one lake spawn \
-           ({run.spawnMs} ms)"⟩]
+           ({run.spawnMs} ms)"⟩,
+    ⟨"mixed TOML members do not regress the full load (PLAN-02)", do
+      let leanTotal := max 1 (phaseMs (recordAt "medium").full "total")
+      let mixedTotal := phaseMs (recordAt "medium-mixed").full "total"
+      -- PLAN-01's regression rule: a change must not cost ≥20% on the realistic fixture.
+      ensure (mixedTotal ≤ leanTotal + leanTotal / 4)
+        s!"mixed-TOML full load {mixedTotal} ms vs Lean-only {leanTotal} ms exceeds the +25% bound"⟩]
   cases
 
 end Suites.Bench

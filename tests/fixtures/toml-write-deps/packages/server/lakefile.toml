@@ -1,0 +1,9 @@
+name = "server"
+
+[[require]]
+name = "batteries"
+git = "https://example.invalid/batteries"
+rev = "deadbeef"
+
+[[lean_lib]]
+name = "Server"

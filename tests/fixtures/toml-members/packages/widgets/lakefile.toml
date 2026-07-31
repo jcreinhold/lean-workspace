@@ -1,0 +1,15 @@
+name = "widgets"
+testDriver = "tool"
+
+[leanOptions]
+linter.missingDocs = true
+
+[[require]]
+name = "helpers"
+path = "../helpers"
+
+[[lean_lib]]
+name = "Widgets"
+
+[[lean_exe]]
+name = "tool"

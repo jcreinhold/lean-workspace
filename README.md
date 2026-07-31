@@ -88,6 +88,31 @@ restore = "requested-only"          # requested-only | package | workspace
 members = ["core", "syntax"]
 ```
 
+## Member lakefile formats
+
+A member may carry `lakefile.lean` **or** `lakefile.toml` — the ecosystem
+standard (batteries, Cli, Qq ship TOML only). A member with both is a config
+error, mirroring Lake's own rule. TOML lakefiles are read with **Lake's own
+TOML parser** (`Lake.Toml.loadToml`, toolchain-shipped), so `lakew` accepts
+exactly what Lake accepts; name/requires/targets/drivers/options map onto the
+same internal scan as Lean lakefiles, and everything downstream (validation,
+planning, drivers, `[options]`, `[deps]`) is format-agnostic.
+
+TOML-specific notes:
+
+- **No script drivers.** Lake cannot declare scripts in TOML lakefiles, so
+  TOML members' test/lint drivers are always exe/lib targets.
+- **`[options]` is verified *exactly*.** TOML option values are always
+  literals, so the "options composed programmatically, verify manually"
+  warning branch never fires for TOML members — the policy is stronger there.
+- **`sync --write-deps` does not rewrite TOML.** A TOML member whose
+  `[[require]]` disagrees with `[deps]` fails with an error naming the manual
+  edit (rewriting Lean lakefiles was the milestone-2 scope; TOML rewriting is
+  deliberately out).
+- **Module discovery stays on-disk.** TOML `globs` restrict what Lake
+  *builds*, not what's on disk; lakew's module index walks the source tree
+  for both formats.
+
 ## Tests and lints (doc §7 semantics)
 
 Member packages declare drivers exactly as Lake expects — `testDriver := "…"` /

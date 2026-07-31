@@ -1,0 +1,4 @@
+name = "mixed"
+
+[[lean_lib]]
+name = "Mixed"

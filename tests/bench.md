@@ -88,3 +88,23 @@ the skew case it targeted is the mathlib fixture itself — and was reverted.
   and 2× leaves no room for machine noise. Tighten when member-scan does.
 - Wall-clock gates are not in CI (CI builds the suite only). Re-run
   `suite-bench` and update this file when plans 02–04 land.
+
+## PLAN-02: TOML lakefile members (measured)
+
+Plan 02 adds a second lakefile format: members may carry `lakefile.toml`,
+read with Lake's own parser (`Lake.Toml.loadToml` — one environment build per
+parse). The generator gained a `tomlMixed` mode (odd members TOML-carried)
+and the suite a regression case: mixed full load must stay within +25% of
+Lean-only on the same shape (PLAN-01's ≥20% regression rule, encoded).
+
+Measured (medium, 30 members × 300 modules, single pass):
+
+| variant | graph total | full total | member-scan (full) |
+| --- | --- | --- | --- |
+| Lean-only | 15 ms | 119 ms | 14 ms |
+| mixed (½ TOML) | 14 ms | 124 ms (+4%) | 12 ms |
+
+The TOML parse cost is noise at this scale — the per-member scan stays
+dominated by the on-disk module walk, and `loadToml`'s environment build is
+sub-ms per member. No mitigation needed; O3's "revisit if plan 02 pushes
+loads into seconds" trigger did not fire.

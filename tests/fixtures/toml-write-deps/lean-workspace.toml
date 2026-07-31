@@ -1,0 +1,6 @@
+[workspace]
+members = ["packages/*"]
+
+[deps.batteries]
+git = "https://example.invalid/batteries"
+rev = "b136111"
