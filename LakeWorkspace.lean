@@ -30,9 +30,11 @@ def load (root : FilePath) (loadModuleImports : Bool := true) (bench : Bool := f
 def select (workspace : Workspace) (query : SelectionQuery) : Except Diagnostics Selection :=
   Selection.select workspace query
 
-/-- Plan an action. Pure given the workspace, selection and action. -/
+/-- Plan an action. Pure except for driver actions (`test`/`lint`), which
+    may read external packages' lakefiles and probe `lake scripts` to
+    resolve drivers qualified to non-member packages. -/
 def plan (workspace : Workspace) (selection : Selection) (action : Action) :
-    Except Diagnostics BuildPlan :=
+    IO (Except Diagnostics BuildPlan) :=
   Planner.plan workspace selection action
 
 /-- Execute a plan: the single Lake subprocess, transactional installs,

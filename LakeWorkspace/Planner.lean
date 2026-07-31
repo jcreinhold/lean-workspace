@@ -44,7 +44,10 @@ inductive Action where
 structure ResolvedDriver where
   /-- The member whose driver this is. -/
   pkg : String
-  /-- The member's directory relative to the workspace root. -/
+  /-- The member's directory relative to the workspace root — or, for a
+      driver target owned by an external package, that package's
+      root-relative directory (in place for path dependencies,
+      `.lake/packages/<pkg>` for git dependencies). -/
   relDir : FilePath
   spec : DriverSpec
   targetKind : TargetKind
@@ -81,16 +84,45 @@ structure BuildPlan where
 
 namespace Planner
 
+/-- The outcome of checking one resolved driver target against Lake's driver
+    rules; the member and external branches of `resolveDrivers` share it. -/
+private inductive DriverCheck where
+  | resolved (d : ResolvedDriver)
+  | skipNote (msg : String)
+  | err (msg : String)
+
+/-- Apply Lake's driver rules: no arguments to library drivers, no library
+    lint drivers. On success the driver is re-anchored to the target's owning
+    package and directory. -/
+private def checkDriverTarget (pkgName kind : String) (spec : DriverSpec)
+    (targetPkg : String) (targetName : String) (relDir : FilePath) (tk : TargetKind) :
+    DriverCheck :=
+  if tk == .lib && (!spec.args.isEmpty) then
+    .err s!"{pkgName}: arguments cannot be passed to library {kind} driver `{targetName}`"
+  else if tk == .lib && kind == "lint" then
+    .skipNote s!"{pkgName}: libraries cannot be lint drivers (skipped)"
+  else
+    .resolved { pkg := targetPkg, relDir, spec := { spec with target := targetName }
+              , targetKind := tk }
+
 /-- Resolve the selected members' drivers of the given kind against declared
     targets. Mirrors Lake's driver resolution: a driver names a script,
-    executable, or library of the package (possibly `pkg/name`-qualified).
-    Unresolvable drivers produce diagnostics; lib drivers with arguments are
-    an error (Lake semantics). -/
+    executable, or library of the package (possibly `pkg/name`-qualified),
+    and a qualified `pkg` may be an *external* package — Lake resolves
+    drivers against the whole workspace, dependencies included (mathlib's
+    `batteries/runLinter` is the motivating case). External targets are
+    found by scanning the materialized package's own lakefile through the
+    same scanner pair members use; one `lake scripts` probe covers script
+    drivers invisible to target scanning. Unresolvable drivers produce
+    diagnostics; lib drivers with arguments are an error (Lake semantics). -/
 def resolveDrivers (ws : Workspace) (sel : Selection) (kind : String) :
-    Except Diagnostics (Array ResolvedDriver × Array String) := do
+    IO (Except Diagnostics (Array ResolvedDriver × Array String)) := do
   let mut diags : Diagnostics := #[]
   let mut notes : Array String := #[]
   let mut out : Array ResolvedDriver := #[]
+  -- Drivers qualified to a non-member package that the external lakefile
+  -- scan could not settle; a single `lake scripts` probe settles them below.
+  let mut pending : Array (String × DriverSpec × String × String) := #[]
   for pkgName in sel.packages do
     let some m := ws.findMember? pkgName | continue
     let spec? := if kind == "test" then m.testDriver else m.lintDriver
@@ -101,11 +133,7 @@ def resolveDrivers (ws : Workspace) (sel : Selection) (kind : String) :
       let (targetPkg, targetName) := match spec.target.splitOn "/" with
         | [p, n] => (p, n)
         | _ => (pkgName, spec.target)
-      let targetMember? := ws.findMember? targetPkg
-      match targetMember? with
-      | none =>
-        notes := notes.push
-          s!"{pkgName}: {kind} driver `{spec.target}` refers to non-member `{targetPkg}` (skipped)"
+      match ws.findMember? targetPkg with
       | some tm =>
         match tm.targets.find? (·.1 == targetName) with
         | none =>
@@ -113,19 +141,43 @@ def resolveDrivers (ws : Workspace) (sel : Selection) (kind : String) :
             s!"{pkgName}: {kind} driver `{targetName}` is not a declared \
                script, executable, or library of `{targetPkg}` (skipped)"
         | some (_, tk) =>
-          if tk == .lib && (!spec.args.isEmpty) then
-            diags := diags ++ Diagnostics.error
-              s!"{pkgName}: arguments cannot be passed to library {kind} driver `{targetName}`"
-          else if tk == .lib && kind == "lint" then
-            notes := notes.push s!"{pkgName}: libraries cannot be lint drivers (skipped)"
-          else
-            out := out.push { pkg := targetPkg, relDir := tm.relDir, spec := { spec with target := targetName }, targetKind := tk }
+          match checkDriverTarget pkgName kind spec targetPkg targetName tm.relDir tk with
+          | .resolved d => out := out.push d
+          | .skipNote msg => notes := notes.push msg
+          | .err msg => diags := diags ++ Diagnostics.error msg
+      | none =>
+        -- External package: same rules, against the dependency's own
+        -- lakefile (in place for path dependencies, materialized under
+        -- `.lake/packages/` for git dependencies).
+        match (← Workspace.scanExternalDrivers ws targetPkg) with
+        | some (relDir, scan) =>
+          match scan.targets.find? (·.1 == targetName) with
+          | some (_, tk) =>
+            match checkDriverTarget pkgName kind spec targetPkg targetName relDir tk with
+            | .resolved d => out := out.push d
+            | .skipNote msg => notes := notes.push msg
+            | .err msg => diags := diags ++ Diagnostics.error msg
+          | none => pending := pending.push (pkgName, spec, targetPkg, targetName)
+        | none => pending := pending.push (pkgName, spec, targetPkg, targetName)
+  if !pending.isEmpty then
+    let scripts ← Backend.LakeCli.lakeScripts ws.root
+    for (pkgName, spec, targetPkg, targetName) in pending do
+      if scripts.any (· == (targetPkg, targetName)) then
+        let relDir := Workspace.externalRelDir? ws targetPkg |>.getD ("." : FilePath)
+        out := out.push { pkg := targetPkg, relDir
+                        , spec := { spec with target := targetName }
+                        , targetKind := .script }
+      else
+        notes := notes.push
+          s!"{pkgName}: {kind} driver `{spec.target}` not found in external \
+             package `{targetPkg}` (skipped)"
   if diags.hasErrors then
-    .error diags
+    return .error diags
   else
-    .ok (out, notes)
+    return .ok (out, notes)
 
-def plan (ws : Workspace) (sel : Selection) (action : Action) : Except Diagnostics BuildPlan := do
+def plan (ws : Workspace) (sel : Selection) (action : Action) :
+    IO (Except Diagnostics BuildPlan) := do
   let baseFp := Workspace.fingerprint ws
   match action with
   | .sync locked offline =>
@@ -134,7 +186,7 @@ def plan (ws : Workspace) (sel : Selection) (action : Action) : Except Diagnosti
       if locked then #[.verifyFiles files]
       else if offline then #[.installFiles files]
       else #[.installFiles files, .runLake #["update"]]
-    .ok {
+    return .ok {
       root := ws.root
       label := if locked then "sync --locked" else if offline then "sync --offline" else "sync"
       steps
@@ -143,7 +195,7 @@ def plan (ws : Workspace) (sel : Selection) (action : Action) : Except Diagnosti
   | .build extraArgs =>
     if sel.targets.isEmpty then
       -- e.g. `--changed` with no changes: a graceful no-op, not an error
-      .ok {
+      return .ok {
         root := ws.root
         label := "build"
         steps := #[]
@@ -151,14 +203,14 @@ def plan (ws : Workspace) (sel : Selection) (action : Action) : Except Diagnosti
         explanations := sel.explanations
         notes := #["empty selection: nothing to build"] }
     else
-      .ok {
+      return .ok {
         root := ws.root
         label := "build"
         steps := #[.runLake (#["build"] ++ sel.targets ++ extraArgs)]
         fingerprint := toString (hash (baseFp, "build", sel.targets, extraArgs))
         explanations := sel.explanations }
   | .clean =>
-    .ok {
+    return .ok {
       root := ws.root
       label := "clean"
       steps := #[.runLake (#["clean"] ++ sel.targets)]
@@ -170,8 +222,10 @@ where
   /-- Shared planning for `test`/`lint`: one build step for every exe/lib
       driver across the whole selection, then one driver-execution step. -/
   planDrivers (ws : Workspace) (sel : Selection) (kind : String)
-      (cliArgs : Array String) (baseFp : String) : Except Diagnostics BuildPlan := do
-    let (drivers, notes) ← resolveDrivers ws sel kind
+      (cliArgs : Array String) (baseFp : String) : IO (Except Diagnostics BuildPlan) := do
+    let (drivers, notes) ← match (← resolveDrivers ws sel kind) with
+      | .error ds => return .error ds
+      | .ok r => pure r
     let buildTargets := drivers.filterMap fun d =>
       if d.targetKind == .script then none else some d.buildTarget
     let buildTargets := buildTargets.insertionSort (· < ·) |>.toList.eraseDups.toArray
@@ -183,7 +237,7 @@ where
     let notes := if drivers.isEmpty then
         notes.push s!"no {kind} drivers in the selection"
       else notes
-    .ok {
+    return .ok {
       root := ws.root
       label := kind
       steps

@@ -716,6 +716,63 @@ private def loadMember (root relDir : FilePath) : IO (Diagnostics × Option Memb
       lintDriver := scan.lintDriver, declaredOptions := scan.declaredOptions,
       hasOptionAssignments := scan.hasOptionAssignments, lakefileFormat := format })
 
+/-! ## External package driver lookup -/
+
+/-- Collapse `.` and `..` components of a relative path lexically (no
+    symlink resolution; `FilePath.normalize` leaves `..` alone). A `..` that
+    would escape above the path's start is preserved — the result is still a
+    valid path, just not a pretty one. -/
+private def collapseDots (p : FilePath) : FilePath := Id.run do
+  let mut out : Array String := #[]
+  for c in p.toString.splitOn "/" do
+    match c with
+    | "" | "." => pure ()
+    | ".." =>
+      match out.back? with
+      | some prev =>
+        if prev == ".." then out := out.push ".." else out := out.pop
+      | none => out := out.push ".."
+    | c => out := out.push c
+  return ⟨"/".intercalate out.toList⟩
+
+/-- The directory of external (non-member) package `pkg`, relative to the
+    workspace root. Path dependencies are used in place — their require path
+    is relative to the *requiring member* — and git dependencies materialize
+    under `.lake/packages/<name>` (the one Lake-version-coupled layout fact
+    about externals). `none` when no member requires `pkg`. Consults member
+    lakefiles' requires directly, so centrally declared `[deps]` and
+    member-local externals resolve identically. -/
+def externalRelDir? (ws : Workspace) (pkg : String) : Option FilePath := do
+  for m in ws.members do
+    if let some r := m.requires.find? (·.name == pkg) then
+      match r.src with
+      | .path dir => return collapseDots (m.relDir / dir)
+      | .git _ _ => return ((".lake/packages" : FilePath) / pkg)
+  none
+
+/-- Scan an external package's lakefile for driver targets, through the same
+    scanner pair members use. Returns the package's root-relative directory
+    and scan; `nothing` when the package isn't required, isn't materialized
+    on disk (never fetched, or `lakew sync` not run), or ships no readable
+    lakefile — the caller's script probe covers the remaining cases. Scan
+    warnings are dropped: an external's lakefile is not the user's to fix.
+    No cache: a `lakew` process is one-shot, and external scans are bounded
+    by the number of external-qualified drivers (recorded in tests/bench.md). -/
+def scanExternalDrivers (ws : Workspace) (pkg : String) :
+    IO (Option (FilePath × LakefileScan)) := do
+  let some relDir := externalRelDir? ws pkg | return none
+  let dir := ws.root / relDir
+  let tomlFile := dir / "lakefile.toml"
+  let leanFile := dir / "lakefile.lean"
+  if ← tomlFile.pathExists then
+    match (← Toml.parse (← IO.FS.readFile tomlFile)) with
+    | .ok t => return some (relDir, (scanLakefileToml t tomlFile).2)
+    | .error _ => return none
+  if ← leanFile.pathExists then
+    let scan := (scanLakefile (tokenize (← IO.FS.readFile leanFile)) leanFile).2
+    return some (relDir, scan)
+  return none
+
 /-! ## Config parsing -/
 
 private def knownKeys (_t : Toml.Table) (groupNames depNames : Array String) : Array String :=

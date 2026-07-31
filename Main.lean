@@ -214,7 +214,7 @@ private def cmdSync (o : CliOpts) : IO UInt32 := do
           IO.println s!"aligned {f.toString}"
   let some ws ← loadWs o | return 1
   let emptySel : Selection := { packages := #[], targets := #[], explanations := #[] }
-  match LakeWorkspace.plan ws emptySel (.sync o.locked o.offline) with
+  match (← LakeWorkspace.plan ws emptySel (.sync o.locked o.offline)) with
   | .error ds => printDiags ds; return 2
   | .ok p => runPlanned o p
 
@@ -237,7 +237,7 @@ private def cmdBuildLike (o : CliOpts) (needsModuleImports : Bool) (action : Sel
   match LakeWorkspace.select ws q with
   | .error ds => printDiags ds; return 2
   | .ok sel =>
-    match LakeWorkspace.plan ws sel (action sel) with
+    match (← LakeWorkspace.plan ws sel (action sel)) with
     | .error ds => printDiags ds; return 2
     | .ok p => runPlanned o p
 

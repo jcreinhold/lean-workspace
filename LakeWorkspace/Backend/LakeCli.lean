@@ -13,9 +13,10 @@ The Lake-version-coupled backend: how generated files are spelled.
 
 This module is the *only* place that knows the syntax of a Lake
 `lakefile.lean`, the JSON schema of `.lake/package-overrides.json`, and the
-command-line surface of the pinned `lake` executable. Everything here is a
-pure rendering/decision function; process spawning lives in
-`LakeWorkspace.Executor`.
+command-line surface of the pinned `lake` executable. The rendering/decision
+functions are pure; process spawning lives in `LakeWorkspace.Executor`, with
+one exception: `lakeScripts` is a read-only probe needed *during* planning
+(Executor imports the plan types, so the reverse edge would cycle).
 -/
 
 public section
@@ -123,6 +124,19 @@ def generatedFiles (ws : Workspace) : Array (FilePath × String) :=
   #[ (⟨"lakefile.lean"⟩, renderRootLakefile ws)
    , (⟨".lake/package-overrides.json"⟩, Json.pretty (renderOverrides ws) ++ "\n")
    , (⟨".lake/workspace/metadata.json"⟩, Json.pretty (renderMetadata ws) ++ "\n") ]
+
+/-- Probe the pinned `lake` for the workspace's declared scripts — members'
+    and dependency packages' alike — as `(pkg, name)` pairs parsed from the
+    `pkg/name` lines of `lake scripts`. Read-only; a failed probe (no sync
+    yet, no packages materialized) yields no scripts rather than an error,
+    since the caller only uses the list as a driver-detection fallback. -/
+def lakeScripts (root : FilePath) : IO (Array (String × String)) := do
+  let out ← IO.Process.output { cmd := "lake", args := #["scripts"], cwd := some root }
+  if out.exitCode != 0 then return #[]
+  return out.stdout.splitOn "\n" |>.filterMap (fun line =>
+    match line.trimAscii.toString.splitOn "/" with
+    | [p, n] => some (p, n)
+    | _ => none) |>.toArray
 
 end LakeWorkspace.Backend.LakeCli
 

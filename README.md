@@ -127,9 +127,22 @@ Member packages declare drivers exactly as Lake expects — `testDriver := "…"
 4. emits a package-qualified report (`--json` for a clean machine-readable form; all build
    output then goes to stderr), and exits nonzero if any driver failed.
 
-Known limitation: drivers qualified to *non-member* packages (e.g. mathlib's
-`batteries/runLinter` lint driver) are skipped with a warning, since driver-kind detection
-scans member lakefiles only.
+A driver may also be qualified to a **non-member** package — mathlib's
+`lintDriver := "batteries/runLinter"` is the standard example. Resolution then
+consults the external package itself, in this order:
+
+1. the package's own lakefile (`lakefile.toml` or `lakefile.lean`), scanned
+   with the same scanners members use — path dependencies are read in place,
+   git dependencies from their materialized `.lake/packages/<pkg>` checkout;
+2. one `lake scripts` probe, when the driver isn't a declared target (it
+   could be a script, invisible to target scanning);
+3. otherwise, a note (`driver … not found in external package … (skipped)`)
+   and the run continues — never an error, and exactly the outcome for an
+   external that hasn't been materialized yet (run `lakew sync` first).
+
+External exe drivers join the single build step (`lake build
+@pkg/target`) and run from the external package's own `.lake/build/bin`,
+with the member's `testDriverArgs`/`lintDriverArgs` applied identically.
 
 ## `[options]` caveats (Lean ≠ Cargo here)
 

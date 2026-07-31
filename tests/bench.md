@@ -108,3 +108,27 @@ The TOML parse cost is noise at this scale — the per-member scan stays
 dominated by the on-disk module walk, and `loadToml`'s environment build is
 sub-ms per member. No mitigation needed; O3's "revisit if plan 02 pushes
 loads into seconds" trigger did not fire.
+
+## PLAN-03: external driver scanning (decision record)
+
+Plan 03 lets `lakew test`/`lakew lint` resolve drivers qualified to
+non-member packages by scanning the external package's lakefile at
+`<pkg-dir>/lakefile.toml|lean` (path deps in place, git deps under
+`.lake/packages/`), with one `lake scripts` probe per invocation as the
+script fallback.
+
+Load-path impact: **none on the member-only path**. External scans run only
+when a selected member's driver is `pkg/name`-qualified to a non-member, so
+every existing benchmark (which has no external-qualified drivers) exercises
+byte-identical work; the bench fixtures were left unchanged and all gates
+still pass. The added reads are bounded by the number of external-qualified
+drivers in the selection (a handful in practice), each a small lakefile —
+far below the measurement floor of the load benchmark.
+
+Cache decision: the plan offered "per-process map" or joining O3's
+scan-cache. Neither shipped: O3 was rejected in PLAN-01, and a `lakew`
+process is one-shot — a per-process cache could only coalesce repeated
+scans of the *same* package within one invocation, which the two-phase
+`resolveDrivers` (static scan pass, then a single shared `lake scripts`
+probe) already makes impossible for the probe and rare for the scan. No
+speculative surface; revisit if a profile ever shows external scans.

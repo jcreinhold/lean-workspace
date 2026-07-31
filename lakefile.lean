@@ -76,6 +76,15 @@ lean_exe «suite-toml-lakefiles» where
   root := `Suites.TomlLakefiles
   supportInterpreter := true
 
+/- The external-driver resolution suite (PLAN-03;
+`tests/Suites/ExternalDrivers.lean`). Builds and runs an exe driver borrowed
+from a path dependency outside `members`, an external script driver, and a
+git dependency materialized at test time. -/
+lean_exe «suite-external-drivers» where
+  srcDir := "tests"
+  root := `Suites.ExternalDrivers
+  supportInterpreter := true
+
 lean_exe «suite-bench» where
   srcDir := "tests"
   root := `Suites.Bench
