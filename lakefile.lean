@@ -93,6 +93,11 @@ lean_exe «suite-cache-policy» where
   root := `Suites.CachePolicy
   supportInterpreter := true
 
+lean_exe «suite-kan-shaped» where
+  srcDir := "tests"
+  root := `Suites.KanShaped
+  supportInterpreter := true
+
 /- The load-path benchmark suite (`tests/Suites/Bench.lean`). Slow: out of
 the default `lake test` set, run via `lake test -- --all` or directly. Its
 gates are wall-clock ratios meant for a human reading `tests/bench.md`; CI

@@ -204,12 +204,22 @@ def plan (ws : Workspace) (sel : Selection) (action : Action) :
         explanations := sel.explanations
         notes := #["empty selection: nothing to build"] }
     else
+      -- `@pkg` on a member with no default targets is a Lake no-op
+      -- ("Nothing to build"); say so rather than letting it pass silently.
+      let notes := sel.packages.filterMap fun p =>
+        match ws.members.find? (·.name == p) with
+        | some m =>
+          if m.defaultTargets.isEmpty && sel.targets.contains s!"@{p}" then
+            some s!"{p}: no default targets configured; `@{p}` builds nothing"
+          else none
+        | none => none
       return .ok {
         root := ws.root
         label := "build"
         steps := #[.runLake (#["build"] ++ sel.targets ++ extraArgs)]
         fingerprint := toString (hash (baseFp, "build", sel.targets, extraArgs))
-        explanations := sel.explanations }
+        explanations := sel.explanations
+        notes := notes }
   | .clean =>
     return .ok {
       root := ws.root

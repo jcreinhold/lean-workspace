@@ -1,0 +1,14 @@
+[workspace]
+name = "kan-shaped"
+members = ["packages/*"]
+
+[deps.mathlib]
+git = "https://example.invalid/mathlib4"
+rev = "master"
+
+[deps.checkdecls]
+git = "https://example.invalid/checkdecls.git"
+
+[deps.lean-fmt]
+git = "https://example.invalid/lean-fmt"
+rev = "v0.1.9"

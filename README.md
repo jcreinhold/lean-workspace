@@ -199,7 +199,9 @@ TOML-specific notes:
 - **`sync --write-deps` does not rewrite TOML.** A TOML member whose `[[require]]`
   disagrees with `[deps]` fails with an error that names the edit to make by hand.
 - **Module discovery walks the source tree.** TOML `globs` restrict what Lake builds, not
-  what is on disk; `lakew` indexes every module file it finds, for both formats.
+  what is on disk; `lakew` indexes every module file it finds, for both formats. The walk
+  honors `srcDir`: the package-level setting (or the member directory when unset) plus any
+  per-target overrides, unioned.
 
 ## Cache policy
 
@@ -251,7 +253,6 @@ External exe drivers join the single build step and run from the external packag
 way.
 
 ## Options policy
-
 Lake does not propagate a root package's `leanOptions` to other packages, so `[options]`
 cannot be configuration Lake applies for you. It is a policy that `lakew check` enforces:
 
@@ -263,3 +264,27 @@ cannot be configuration Lake applies for you. It is a policy that `lakew check` 
 For one true source of shared options, make a small support package in the repo that
 exports `def workspaceLeanOptions : Array LeanOption`. Members `require` it and splice its
 value into their own `leanOptions`.
+
+## Lake behavior notes
+
+Facts about Lake itself that shape what `lakew` emits, so nobody "simplifies" a plan into
+one of these traps:
+
+- **`lake build <lib>` on a dependency package can fail spuriously.** If a `lean_lib`'s
+  root module has no source file (e.g. `lean_lib A` with `A/` but no `A.lean`), Lake
+  fails the lib build with `<lib>: some modules have bad imports` and hides the real
+  error (a missing file) — even though module targets build fine
+  ([leanprover/lean4#14619](https://github.com/leanprover/lean4/issues/14619)). `lakew`
+  avoids this path: plans name `@<member>` package specs, `@<pkg>/<target>` driver
+  specs, and module names, never bare lib names. Keep it that way. Give every lib a root
+  file.
+- **`@<member>` on a member with no default targets builds nothing.** Lake prints a
+  "Nothing to build" note and exits successfully. `lakew` surfaces this as a plan note
+  (`<member>: no default targets configured; `@<member>` builds nothing`) instead of
+  letting it pass silently.
+- **Bare `lake build` at the generated root builds nothing.** Default targets belong to
+  packages, and the generated root declares none; use `lakew build` (or `make` verbs that
+  call it) rather than bare `lake build`.
+- **Member scripts are qualified.** A script declared in member `tools` runs as
+  `lake run tools/<name>`, and script bodies inherit the caller's working directory
+  (Lake does not `chdir`).

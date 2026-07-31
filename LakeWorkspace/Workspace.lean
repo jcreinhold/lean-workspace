@@ -92,6 +92,9 @@ structure MemberPkg where
   targets : Array (String × TargetKind) := #[]
   testDriver : Option DriverSpec := none
   lintDriver : Option DriverSpec := none
+  /-- Targets marked `@[default_target]` or named in `defaultTargets := #[...]`.
+      Empty means `lake build @<pkg>` builds nothing (Lake warns and stops). -/
+  defaultTargets : Array String := #[]
   /-- Canonical `⟨`name, value⟩` Lean-option tuples found in the lakefile
       (value rendered as a string: `true`/`false`, a numeral, or a quoted
       string). Used for `[options]` policy validation; see the note in
@@ -311,6 +314,16 @@ structure LakefileScan where
   targets : Array (String × TargetKind) := #[]
   testDriver : Option DriverSpec := none
   lintDriver : Option DriverSpec := none
+  /-- Targets marked `@[default_target]` or named in `defaultTargets := #[...]`.
+      Empty means `lake build @<pkg>` builds nothing (Lake warns and stops). -/
+  defaultTargets : Array String := #[]
+  /-- The package-level `srcDir := "..."` (the `package ... where` clause).
+      Replaces the Lake default (the package directory) for targets without
+      their own override. -/
+  pkgSrcDir : Option String := none
+  /-- Target-level `srcDir := "..."` overrides (in `lean_lib`/`lean_exe`
+      clauses), unioned with `pkgSrcDir` when indexing modules. -/
+  srcDirs : Array String := #[]
   /-- Canonical `⟨`name, value⟩` Lean-option tuples found in the lakefile
       (value rendered as a string: `true`/`false`, a numeral, or a quoted
       string). Used for `[options]` policy validation; see the note in
@@ -331,6 +344,7 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
   let mut scan : LakefileScan := {}
   let mut taggedTest : Option String := none
   let mut taggedLint : Option String := none
+  let mut seenTarget : Bool := false
   let mut i := 0
   let warn (msg : String) : Diagnostics := Diagnostics.warning s!"{origin.toString}: {msg}"
   while i < toks.size do
@@ -360,10 +374,11 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
       | none => diags := diags ++ warn "could not parse a `require` declaration"
       i := i + 1
     | .at =>
-      -- possible @[test_driver] / @[lint_driver] tag before a target decl
+      -- possible @[default_target] / @[test_driver] / @[lint_driver] tag
+      -- before a target decl
       match toks[i + 1]?, toks[i + 2]?, toks[i + 3]? with
       | some (.sym '['), some (.ident attr), some (.sym ']') =>
-        if attr == "test_driver" || attr == "lint_driver" then
+        if attr == "test_driver" || attr == "lint_driver" || attr == "default_target" then
           -- find the following target declaration
           let mut j := i + 4
           let mut found := false
@@ -373,7 +388,9 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
               if kw == "script" || kw == "lean_exe" || kw == "lean_lib" then
                 match toks[j + 1]? with
                 | some (.ident n) =>
-                  if attr == "test_driver" then taggedTest := some n else taggedLint := some n
+                  if attr == "test_driver" then taggedTest := some n
+                  else if attr == "lint_driver" then taggedLint := some n
+                  else scan := { scan with defaultTargets := scan.defaultTargets.push n }
                   found := true
                 | _ => found := true
             | _ => pure ()
@@ -384,6 +401,7 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
       if kw == "leanOptions" || kw == "moreLeanOptions" then
         scan := { scan with hasOptionAssignments := true }
       if kw == "script" || kw == "lean_exe" || kw == "lean_lib" then
+        seenTarget := true
         let kind := if kw == "script" then TargetKind.script
           else if kw == "lean_exe" then TargetKind.exe else TargetKind.lib
         match toks[i + 1]? with
@@ -439,6 +457,38 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
               diags := diags ++ warn s!"could not parse `{kw}` value"
               i := i + 1
         | _, _ => i := i + 1
+      else if kw == "srcDir" then
+        match toks[i + 1]?, toks[i + 2]?, toks[i + 3]? with
+        | some (.sym ':'), some (.sym '='), some (.str s) =>
+          -- Before the first target declaration, this is the `package ...
+          -- where` clause (package-level default); after, a target override.
+          if seenTarget then
+            scan := { scan with srcDirs := scan.srcDirs.push s }
+          else
+            scan := { scan with pkgSrcDir := some s }
+          i := i + 4
+        | _, _, _ => i := i + 1
+      else if kw == "defaultTargets" then
+        match toks[i + 1]?, toks[i + 2]?, toks[i + 3]?, toks[i + 4]? with
+        | some (.sym ':'), some (.sym '='), some (.sym '#'), some (.sym '[') =>
+          let mut j := i + 5
+          let mut ok := true
+          while j < toks.size && ok do
+            match toks[j]! with
+            | .sym '`' =>
+              match toks[j + 1]? with
+              | some (.ident n) =>
+                scan := { scan with defaultTargets := scan.defaultTargets.push n }
+                j := j + 2
+              | _ => ok := false
+            | .str n =>
+              scan := { scan with defaultTargets := scan.defaultTargets.push n }
+              j := j + 1
+            | .sym ',' => j := j + 1
+            | .sym ']' => ok := false
+            | _ => ok := false
+          i := j + 1
+        | _, _, _, _ => i := i + 1
       else
         i := i + 1
     | .sym '⟨' =>
@@ -530,10 +580,18 @@ private def scanLakefileToml (t : Toml.Table) (origin : FilePath) :
     match lt.getStr "name" with
     | some n => scan := { scan with targets := scan.targets.push (n, .lib) }
     | none => diags := diags ++ warn "a [[lean_lib]] block is missing `name`"
+    if let some sd := lt.getStr "srcDir" then
+      scan := { scan with srcDirs := scan.srcDirs.push sd }
   for et in t.tables "lean_exe" do
     match et.getStr "name" with
     | some n => scan := { scan with targets := scan.targets.push (n, .exe) }
     | none => diags := diags ++ warn "a [[lean_exe]] block is missing `name`"
+    if let some sd := et.getStr "srcDir" then
+      scan := { scan with srcDirs := scan.srcDirs.push sd }
+  if let some sd := t.getStr "srcDir" then
+    scan := { scan with pkgSrcDir := some sd }
+  if let some dts := t.getStrArray "defaultTargets" then
+    scan := { scan with defaultTargets := dts }
   if let some d := t.getStr "testDriver" then
     scan := { scan with testDriver := some ({ kind := "test", target := d } : DriverSpec) }
   if let some d := t.getStr "lintDriver" then
@@ -653,27 +711,35 @@ private def isIdentComponent (s : String) : Bool :=
     s.toList.all fun c => c.isAlphanum || c == '_' || c == '\''
 
 /-- Top-level module roots and the full module list of a member directory. -/
-private def scanModules (dir : FilePath) : IO (Array String × Array String) := do
+private def scanModules (dir : FilePath) (pkgSrcDir : Option String) (srcDirs : Array String) :
+    IO (Array String × Array String) := do
   let skip : FilePath → IO Bool := fun p =>
     return !(p.fileName.getD "").startsWith "."
-  let paths ← try dir.walkDir (enter := skip) catch _ => pure #[]
+  -- Lake's default srcDir is the package directory itself; target-level
+  -- overrides union with the package-level default, they do not replace it.
+  let pkgBase := match pkgSrcDir with
+    | some sd => dir / (⟨sd⟩ : FilePath)
+    | none => dir
+  let bases := #[pkgBase] ++ srcDirs.map fun sd => dir / (⟨sd⟩ : FilePath)
   let mut roots : Array String := #[]
   let mut modules : Array String := #[]
-  for p in paths do
-    let ps := p.toString
-    if ps.endsWith ".lean" && p.fileName != some "lakefile.lean" then
-      let rel0 := (ps.drop (dir.toString.length + 1)).toString.toList
-      let rel := String.ofList (rel0.take (rel0.length - 5))
-      let comps := rel.splitOn "/"
-      if comps.all isIdentComponent then
-        let modName := ".".intercalate comps
-        modules := modules.push modName
-        match comps with
-        | [single] =>
-          if !roots.contains single then roots := roots.push single
-        | rootComp :: _ =>
-          if !roots.contains rootComp then roots := roots.push rootComp
-        | [] => pure ()
+  for base in bases do
+    let paths ← try base.walkDir (enter := skip) catch _ => pure #[]
+    for p in paths do
+      let ps := p.toString
+      if ps.endsWith ".lean" && p.fileName != some "lakefile.lean" then
+        let rel0 := (ps.drop (base.toString.length + 1)).toString.toList
+        let rel := String.ofList (rel0.take (rel0.length - 5))
+        let comps := rel.splitOn "/"
+        if comps.all isIdentComponent then
+          let modName := ".".intercalate comps
+          if !modules.contains modName then modules := modules.push modName
+          match comps with
+          | [single] =>
+            if !roots.contains single then roots := roots.push single
+          | rootComp :: _ =>
+            if !roots.contains rootComp then roots := roots.push rootComp
+          | [] => pure ()
   return (roots, modules)
 
 private def readOptionalFile (p : FilePath) : IO (Option String) :=
@@ -712,7 +778,7 @@ private def loadMember (root relDir : FilePath) : IO (Diagnostics × Option Memb
     diags := diags ++ Diagnostics.error s!"{lakefile.toString}: {what}"
     return (diags, none)
   | some name =>
-    let (roots, modules) ← scanModules dir
+    let (roots, modules) ← scanModules dir scan.pkgSrcDir scan.srcDirs
     if roots.isEmpty then
       diags := diags ++ Diagnostics.warning s!"member `{name}` at {relDir.toString} has no Lean modules"
     let toolchain? := (← readOptionalFile (dir / "lean-toolchain")).map fun t => t.trimAscii.toString
@@ -720,7 +786,8 @@ private def loadMember (root relDir : FilePath) : IO (Diagnostics × Option Memb
       name, relDir, requires := scan.requires, moduleRoots := roots,
       modules := modules.insertionSort (· < ·), toolchain := toolchain?,
       targets := scan.targets, testDriver := scan.testDriver,
-      lintDriver := scan.lintDriver, declaredOptions := scan.declaredOptions,
+      lintDriver := scan.lintDriver, defaultTargets := scan.defaultTargets,
+      declaredOptions := scan.declaredOptions,
       hasOptionAssignments := scan.hasOptionAssignments, lakefileFormat := format })
 
 /-! ## External package driver lookup -/
