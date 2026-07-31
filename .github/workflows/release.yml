@@ -93,6 +93,9 @@ jobs:
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout in this job: gh needs the repo named explicitly,
+          # or `gh release create` fails with "not a git repository".
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --generate-notes
           cat SHA256SUMS
