@@ -40,7 +40,7 @@ private def lines (s : String) : Array String :=
 /--
 Paths changed relative to `ref?` (or the working tree if `none`), relative to
 `root`. Includes staged, unstaged and untracked changes; with a ref, diffs the
-merge base of `ref` and `HEAD` (doc §8: "Ask Git for changed paths").
+merge base of `ref` and `HEAD`.
 -/
 def changedPaths (root : FilePath) (ref? : Option String) : IO (Except String (Array FilePath)) := do
   -- Anchor everything at the git toplevel so workspaces in subdirectories work.

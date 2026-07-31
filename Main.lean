@@ -24,20 +24,35 @@ private def usage : String :=
   "              --locked    fail if generated files would change\n" ++
   "              --offline   install generated files but do not resolve\n" ++
   "              --frozen    --locked + --offline\n" ++
+  "              --write-deps  first rewrite member Lean lakefiles so their\n" ++
+  "                          requires match [deps] (TOML lakefiles are not\n" ++
+  "                          rewritten)\n" ++
   "  check     Fail if generated files are stale or architecture is violated.\n" ++
   "  build     One `lake build` for the selected targets.\n" ++
-  "              -p, --package <name>   select a member (repeatable)\n" ++
-  "              --group <name>         select a named group\n" ++
-  "              --all                  select all members\n" ++
-  "              --changed [<ref>]      select members changed since <ref>\n" ++
-  "                                   (or the working tree), plus reverse deps\n" ++
-  "              @pkg[/target]          package-qualified target passthrough\n" ++
-  "              -- <args>              pass remaining args to lake verbatim\n" ++
+  "  test      Build every selected member's test driver in one `lake build`,\n" ++
+  "            run them, print one report; nonzero exit if any driver failed.\n" ++
+  "              -- <args>   pass remaining args to each driver\n" ++
+  "              --json      report as JSON; build output goes to stderr\n" ++
+  "  lint      Like test, for lint drivers.\n" ++
   "  clean     `lake clean` for the selected targets.\n" ++
   "  graph     Print the member dependency graph.\n" ++
+  "  why <from> <to>\n" ++
+  "            Show the dependency path between two members.\n" ++
   "  metadata  Print canonical workspace metadata.\n" ++
   "  cache     `lake cache` from the workspace root (args forwarded verbatim),\n" ++
   "            or `lakew cache status` for the effective [cache] policy.\n" ++
+  "\n" ++
+  "SELECTION (build, test, lint, clean)\n" ++
+  "  -p, --package <name>   select a member (repeatable)\n" ++
+  "  --group <name>         select a named group\n" ++
+  "  --all                  select all members\n" ++
+  "  --changed [<ref>]      members owning files changed since <ref> (or the\n" ++
+  "                         working tree), plus their reverse dependencies\n" ++
+  "  --affected [<ref>]     module-level: members whose modules changed or\n" ++
+  "                         import a changed module\n" ++
+  "  @pkg[/target]          package-qualified target passthrough\n" ++
+  "  -- <args>              pass remaining args to lake (build) or each\n" ++
+  "                         driver (test, lint)\n" ++
   "\n" ++
   "COMMON OPTIONS\n" ++
   "  --root <dir>   workspace root (default: nearest lean-workspace.toml\n" ++

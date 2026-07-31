@@ -46,7 +46,7 @@ def quoteIdent (s : String) : String :=
     s.toList.all fun c => c.isAlphanum || c == '_' || c == '\''
   if plain && !keywords.contains s then s else s!"«{s}»"
 
-/-- The prominent do-not-edit header for generated files (doc §2). -/
+/-- The prominent do-not-edit header for generated files. -/
 def generatedHeader : String :=
   "/- ============================================================================\n" ++
   "   GENERATED FILE — DO NOT EDIT.\n" ++

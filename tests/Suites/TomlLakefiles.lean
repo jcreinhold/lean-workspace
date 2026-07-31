@@ -11,11 +11,11 @@ public import Test
 /-!
 # The lakefile.toml suite
 
-PLAN-02's verification: members may carry `lakefile.toml` (the ecosystem
+Members may carry `lakefile.toml` (the ecosystem
 standard — batteries, Cli, Qq ship nothing else) and everything downstream
 works unchanged: requires validated, drivers discovered, `[options]` policy
 enforced *exactly* (TOML values are always literals — the "verify manually"
-escape hatch never fires), `[deps]` mismatch diagnostics name the TOML file,
+warning never fires), `[deps]` mismatch diagnostics name the TOML file,
 `--write-deps` declines TOML rewrites with a named manual edit, and a member
 carrying both formats is a config error (Lake's own rule).
 

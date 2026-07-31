@@ -94,8 +94,8 @@ structure MemberPkg where
   lintDriver : Option DriverSpec := none
   /-- Canonical `⟨`name, value⟩` Lean-option tuples found in the lakefile
       (value rendered as a string: `true`/`false`, a numeral, or a quoted
-      string). Used for `[options]` policy validation; see the phase-4 spike
-      note in `scanLakefile`. -/
+      string). Used for `[options]` policy validation; see the note in
+      `scanLakefile`. -/
   declaredOptions : Array (String × String) := #[]
   /-- Whether the lakefile mentions `leanOptions`/`moreLeanOptions` at all. -/
   hasOptionAssignments : Bool := false
@@ -313,8 +313,8 @@ structure LakefileScan where
   lintDriver : Option DriverSpec := none
   /-- Canonical `⟨`name, value⟩` Lean-option tuples found in the lakefile
       (value rendered as a string: `true`/`false`, a numeral, or a quoted
-      string). Used for `[options]` policy validation; see the phase-4 spike
-      note in `scanLakefile`. -/
+      string). Used for `[options]` policy validation; see the note in
+      `scanLakefile`. -/
   declaredOptions : Array (String × String) := #[]
   /-- Whether the lakefile mentions `leanOptions`/`moreLeanOptions` at all. -/
   hasOptionAssignments : Bool := false
@@ -442,9 +442,9 @@ private def scanLakefile (toks : Array Tok) (origin : FilePath) :
       else
         i := i + 1
     | .sym '⟨' =>
-      -- canonical option tuple ⟨`name, value⟩; see phase-4 spike: real
-      -- lakefiles also compose options programmatically (`weak ++`, abbrevs),
-      -- which is deliberately out of scope for this scan.
+      -- canonical option tuple ⟨`name, value⟩. Real lakefiles also compose
+      -- options programmatically (`weak ++`, abbrevs), which is deliberately
+      -- out of scope for this scan.
       match toks[i + 1]?, toks[i + 2]?, toks[i + 3]? with
       | some (.sym '`'), some (.ident n), some (.sym ',') =>
         let valueEnd (j : Nat) : Option (String × Nat) :=
@@ -548,7 +548,7 @@ private def scanLakefileToml (t : Toml.Table) (origin : FilePath) :
   if scan.testDriver.any (·.target.isEmpty) then scan := { scan with testDriver := none }
   if scan.lintDriver.any (·.target.isEmpty) then scan := { scan with lintDriver := none }
   -- Lean options: the package's `[leanOptions]` table plus each target's
-  -- inline `leanOptions`, all literal (TOML has no composition escape hatch).
+  -- inline `leanOptions`, all literal (TOML has no way to compose options).
   let optEntries (tab : Toml.Table) : Array (String × String) :=
     tab.entries.filterMap fun (k, v) =>
       if k.startsWith "leanOptions." then
@@ -1136,10 +1136,9 @@ private def renderAlignedRequire (line : String) (cd : CentralDep) : Option Stri
 /-- Rewrite member `require` declarations to match the central `[deps]`
     declarations. Only canonical single-line requires in `lakefile.lean` are
     rewritten; anything else is an error naming the file and the edit to make
-    by hand. `lakefile.toml` members are never rewritten (rewriting Lean
-    lakefiles was the milestone-2 scope): a TOML require that disagrees with
-    the central declaration is an error naming the manual edit. Returns the
-    files that were modified. -/
+    by hand. `lakefile.toml` members are never rewritten: a TOML require
+    that disagrees with the central declaration is an error naming the manual
+    edit. Returns the files that were modified. -/
 def alignDepsWithCentral (root : FilePath) : IO (Except Diagnostics (Array FilePath)) := do
   let manifestText? ← readOptionalFile (root / "lean-workspace.toml")
   let manifestText ← match manifestText? with

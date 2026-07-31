@@ -33,7 +33,7 @@ inductive Action where
   | clean
   /-- Aggregate the selected members' test drivers: build every exe/lib
       driver in one graph, then run exe/script drivers with bounded
-      parallelism (doc §7). -/
+      parallelism. -/
   | test (cliArgs : Array String)
   /-- Aggregate the selected members' lint drivers. -/
   | lint (cliArgs : Array String)

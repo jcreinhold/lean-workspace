@@ -67,17 +67,17 @@ lean_exe «suite-options-policy» where
   root := `Suites.OptionsPolicy
   supportInterpreter := true
 
-/- The load-path benchmark suite (`tests/Suites/Bench.lean`). Slow: out of
-the default `lake test` set, run via `lake test -- --all` or directly. Its
-gates are wall-clock ratios meant for a human reading `tests/bench.md`; CI
-builds it but does not time it. -/
+/- The TOML-lakefile suite (`tests/Suites/TomlLakefiles.lean`): members
+may carry `lakefile.toml` instead of `lakefile.lean`; scanned with Lake's
+own parser, they behave identically downstream (validation, drivers,
+`[options]`, `[deps]`). -/
 lean_exe «suite-toml-lakefiles» where
   srcDir := "tests"
   root := `Suites.TomlLakefiles
   supportInterpreter := true
 
-/- The external-driver resolution suite (PLAN-03;
-`tests/Suites/ExternalDrivers.lean`). Builds and runs an exe driver borrowed
+/- The external-driver resolution suite
+(`tests/Suites/ExternalDrivers.lean`). Builds and runs an exe driver borrowed
 from a path dependency outside `members`, an external script driver, and a
 git dependency materialized at test time. -/
 lean_exe «suite-external-drivers» where
@@ -85,7 +85,7 @@ lean_exe «suite-external-drivers» where
   root := `Suites.ExternalDrivers
   supportInterpreter := true
 
-/- The cache-policy suite (PLAN-04; `tests/Suites/CachePolicy.lean`):
+/- The cache-policy suite (`tests/Suites/CachePolicy.lean`):
 `[cache]` → generated-root cache knobs, `--try-cache` on sync, remote-service
 validation, and the `lakew cache` pass-through/status command. -/
 lean_exe «suite-cache-policy» where
@@ -93,6 +93,10 @@ lean_exe «suite-cache-policy» where
   root := `Suites.CachePolicy
   supportInterpreter := true
 
+/- The load-path benchmark suite (`tests/Suites/Bench.lean`). Slow: out of
+the default `lake test` set, run via `lake test -- --all` or directly. Its
+gates are wall-clock ratios meant for a human reading `tests/bench.md`; CI
+builds it but does not time it. -/
 lean_exe «suite-bench» where
   srcDir := "tests"
   root := `Suites.Bench

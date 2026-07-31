@@ -11,8 +11,7 @@ public import LakeWorkspace.Planner
 The combined test/lint report model.
 
 One deep module owning report structure, text rendering, and JSON rendering,
-so the executor only produces data and the CLI only prints it (doc §7.5:
-"a combined machine-readable report").
+so the executor only produces data and the CLI only prints it.
 -/
 
 public section

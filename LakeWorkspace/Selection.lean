@@ -14,8 +14,8 @@ Package and target selection.
 Pure: given a `Workspace` and a `SelectionQuery` (whose `changedPaths`, if
 any, have already been gathered by the caller — git subprocesses live in the
 backend layer), produce a canonical, sorted, deduplicated set of
-package-qualified Lake targets plus an explanation trace (doc §8: "The
-selection result should explain itself").
+package-qualified Lake targets plus an explanation trace that says why each
+package was selected.
 -/
 
 public section
@@ -33,7 +33,7 @@ structure SelectionQuery where
       `none` = no changed-selection; `some #[]` = nothing changed. -/
   changedPaths : Option (Array FilePath) := none
   /-- Like `changedPaths`, but selects via the reverse *module* import
-      closure instead of whole packages (doc §8 fine-grained selection). -/
+      closure instead of whole packages. -/
   affectedPaths : Option (Array FilePath) := none
   /-- Explicitly request all members. -/
   all : Bool := false
@@ -50,7 +50,7 @@ structure Selection where
 
 namespace Selection
 
-/-- Paths whose change globally affects every member (doc §8 step 4). -/
+/-- Paths whose change globally affects every member. -/
 def isGlobalTrigger (rel : FilePath) : Bool :=
   let s := rel.toString
   s == "lean-toolchain" || s == "lean-workspace.toml" || s == "lakefile.lean" ||

@@ -155,7 +155,7 @@ def runStep (root : FilePath) (capture : Bool) : PlanStep → IO (UInt32 × Opti
     return (code, some report)
 
 /-- Execute steps in order; stop at the first failure and return its code.
-    Driver steps always run every driver (aggregation, doc §7); their report
+    Driver steps always run every driver (aggregation); their report
     is returned to the caller. With `capture`, subprocess output goes to
     stderr so stdout carries only the report. -/
 def execute (plan : BuildPlan) (capture : Bool := false) : IO (UInt32 × Option Report) := do

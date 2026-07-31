@@ -11,7 +11,7 @@ public import Test
 /-!
 # The external-drivers suite
 
-PLAN-03: drivers qualified to **non-member** packages — mathlib's
+Drivers qualified to **non-member** packages — mathlib's
 `lintDriver := "batteries/runLinter"` is the motivating case — resolve
 against the external package's own lakefile. The fixture's member `app`
 borrows an exe (`shared/runner`) and a script (`shared/verify`) from a

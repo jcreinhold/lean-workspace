@@ -78,7 +78,7 @@ def moduleImportsOf (sizes : Array Nat) (i j : Nat) : Array String := Id.run do
 
 /-- Write one synthetic workspace of `size` under `dir`. With `tomlMixed`,
 odd-numbered members carry a `lakefile.toml` instead of a `lakefile.lean`
-(the PLAN-02 measurement: mixed members vs Lean-only on the same shape). -/
+(mixed members vs Lean-only on the same shape). -/
 def generate (dir : System.FilePath) (size : Size) (tomlMixed : Bool := false) : IO Unit := do
   IO.FS.createDirAll (dir / "packages")
   IO.FS.writeFile (dir / "lean-toolchain") "leanprover/lean4:v4.33.0-rc1\n"
@@ -168,7 +168,7 @@ def collect (root : System.FilePath) : IO Run := do
       generate dir size
       let (graph, full) ← measure lakew dir
       pure ⟨size, graph, full⟩
-    -- PLAN-02: the same medium shape with half the members TOML-carried.
+    -- The same medium shape with half the members TOML-carried.
     let mixedDir := tmp / "medium-mixed"
     generate mixedDir medium (tomlMixed := true)
     let (graph, full) ← measure lakew mixedDir
@@ -200,10 +200,10 @@ def cases (run : Run) : Array Case :=
       ensure (phaseMs (recordAt "mathlib").graph "total" ≤ budget)
         s!"graph total {(phaseMs (recordAt "mathlib").graph "total")} ms exceeds 4× one lake spawn \
            ({run.spawnMs} ms)"⟩,
-    ⟨"mixed TOML members do not regress the full load (PLAN-02)", do
+    ⟨"mixed TOML members do not regress the full load", do
       let leanTotal := max 1 (phaseMs (recordAt "medium").full "total")
       let mixedTotal := phaseMs (recordAt "medium-mixed").full "total"
-      -- PLAN-01's regression rule: a change must not cost ≥20% on the realistic fixture.
+      -- Regression rule: a change must not cost ≥20% on the realistic fixture.
       ensure (mixedTotal ≤ leanTotal + leanTotal / 4)
         s!"mixed-TOML full load {mixedTotal} ms vs Lean-only {leanTotal} ms exceeds the +25% bound"⟩]
   cases

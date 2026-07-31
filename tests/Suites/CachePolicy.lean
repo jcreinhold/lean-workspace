@@ -11,10 +11,10 @@ public import Test
 /-!
 # The cache-policy suite
 
-PLAN-04: `[cache]` maps Cargo's `[profile.*]` row onto Lake's artifact
+`[cache]` configures Lake's artifact
 cache. `cache.local`/`cache.restore` are real *configuration* — the
 generated root lakefile's `enableArtifactCache`/`restoreAllArtifacts`
-propagate from the workspace root to every member and dependency (spiked:
+propagate from the workspace root to every member and dependency (measured:
 a dependency's oleans land in the toolchain cache, and
 `restoreAllArtifacts := true` restores the classic build-dir layout);
 `cache.try-cache` appends `--try-cache` to sync's one `lake update`;
