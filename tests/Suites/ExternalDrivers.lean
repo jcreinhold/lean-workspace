@@ -71,7 +71,7 @@ def gitCases (lakew dir : System.FilePath) : Array Case := #[
     let upstream := dir / "upstream" / "sharedgit"
     IO.FS.createDirAll upstream
     IO.FS.writeFile (upstream / "lakefile.lean")
-      "import Lake\nopen Lake DSL\n\npackage «sharedgit» where\n\nlean_exe tool where\n"
+      "import Lake\nopen Lake DSL\n\npackage «sharedgit» where\n\nlean_exe tool where\n  root := `Tool\n"
     IO.FS.writeFile (upstream / "Tool.lean")
       "def main : IO UInt32 := do IO.println \"git exe ran\"; return 0\n"
     initGitRepo upstream
