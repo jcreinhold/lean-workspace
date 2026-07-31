@@ -127,6 +127,11 @@ def select (ws : Workspace) (q : SelectionQuery) : Except Diagnostics Selection 
           if !owners.contains c then
             st := add st c "depends on a changed package"
     if let some paths := q.affectedPaths then
+      if !ws.hasModuleImportIndex then
+        -- Main guarantees the index for --affected; this guards other callers.
+        return .error (Diagnostics.error
+          "internal error: --affected requires the module import index, but the \
+           workspace was loaded without it")
       if paths.any isGlobalTrigger then
         for m in ws.members do
           st := add st m.name "globally affected (toolchain/manifest/policy changed)"

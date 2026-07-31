@@ -22,8 +22,9 @@ namespace LakeWorkspace
 
 /-- Load, discover, resolve and validate the workspace rooted at `root`
     (the directory containing `lean-workspace.toml`). Spawns no processes. -/
-def load (root : FilePath) : IO (Except Diagnostics Workspace) :=
-  Workspace.load root
+def load (root : FilePath) (loadModuleImports : Bool := true) (bench : Bool := false) :
+    IO (Except Diagnostics Workspace) :=
+  Workspace.load root loadModuleImports bench
 
 /-- Select a canonical set of package-qualified targets. Pure. -/
 def select (workspace : Workspace) (query : SelectionQuery) : Except Diagnostics Selection :=

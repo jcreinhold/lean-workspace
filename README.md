@@ -124,8 +124,20 @@ splice into their own `leanOptions`.
 
 ```bash
 lake build          # builds lakew itself (Lean module system, v4.33.0-rc1)
-bash test/run.sh    # golden tests, fixtures, violation diagnostics, stock-lake interop
+bash test/run.sh    # legacy shell suite: goldens, fixtures, violations, stock-lake interop
 ```
+
+New tests and benchmarks are native Lean suites in the `tests/` tree (lean-fmt
+style), sharing the `TestSupport` library (`tests/Test`: harness, process
+spawning, temp-dir fixtures):
+
+```bash
+lake build suite-bench && .lake/build/bin/suite-bench   # load-path benchmark
+```
+
+The benchmark suite's measurements and optimization decisions live in
+`tests/bench.md`. `test/run.sh` remains the CI regression gate; its suites
+migrate onto `TestSupport` incrementally.
 
 Toolchain: `leanprover/lean4:v4.33.0-rc1`.
 

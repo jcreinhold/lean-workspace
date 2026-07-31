@@ -56,6 +56,8 @@ private structure CliOpts where
   affected : Option (Option String) := none
   all : Bool := false
   writeDeps : Bool := false
+  /-- Hidden flag: print `load` phase timings to stderr (`bench: <phase> <ms>`). -/
+  bench : Bool := false
   passthrough : Array String := #[]
   deriving Inhabited
 
@@ -84,6 +86,7 @@ private def parseArgs (args : List String) : Except String CliOpts := Id.run do
         | "--offline" => o := { o with offline := true }
         | "--frozen" => o := { o with locked := true, offline := true }
         | "--write-deps" => o := { o with writeDeps := true }
+        | "--bench" => o := { o with bench := true }
         | "--all" => o := { o with all := true }
         | "-p" | "--package" =>
           match rest with
@@ -140,15 +143,17 @@ private def findWsRoot (o : CliOpts) : IO (Option FilePath) := do
   | some r => pure (some r)
   | none => findRoot cwd
 
-/-- Locate the root and load the workspace; on failure print and exit 1. -/
-private def loadWs (o : CliOpts) : IO (Option Workspace) := do
+/-- Locate the root and load the workspace; on failure print and exit 1.
+    `needsModuleImports := false` skips the per-module import index for
+    commands that never consult it (see `Workspace.load`). -/
+private def loadWs (o : CliOpts) (needsModuleImports : Bool := true) : IO (Option Workspace) := do
   let root? ← findWsRoot o
   match root? with
   | none =>
     IO.eprintln "error: no lean-workspace.toml found at or above the current directory"
     return none
   | some root =>
-    match (← LakeWorkspace.load root) with
+    match (← LakeWorkspace.load root (loadModuleImports := needsModuleImports) (bench := o.bench)) with
     | .error ds => printDiags ds; return none
     | .ok ws => return some ws
 
@@ -225,8 +230,9 @@ private def cmdCheck (o : CliOpts) : IO UInt32 := do
       IO.eprintln s!"  {s}"
     return 1
 
-private def cmdBuildLike (o : CliOpts) (action : Selection → Action) : IO UInt32 := do
-  let some ws ← loadWs o | return 1
+private def cmdBuildLike (o : CliOpts) (needsModuleImports : Bool) (action : Selection → Action) :
+    IO UInt32 := do
+  let some ws ← loadWs o needsModuleImports | return 1
   let some q ← mkQuery o ws.root | return 1
   match LakeWorkspace.select ws q with
   | .error ds => printDiags ds; return 2
@@ -236,7 +242,7 @@ private def cmdBuildLike (o : CliOpts) (action : Selection → Action) : IO UInt
     | .ok p => runPlanned o p
 
 private def cmdGraph (o : CliOpts) : IO UInt32 := do
-  let some ws ← loadWs o | return 1
+  let some ws ← loadWs o false | return 1
   if o.json then
     let j := Json.obj #[
       ("members", .arr (ws.memberNames.map .str)),
@@ -254,7 +260,7 @@ private def cmdGraph (o : CliOpts) : IO UInt32 := do
 private def cmdWhy (o : CliOpts) (args : List String) : IO UInt32 := do
   match args with
   | [from_, to] => do
-    let some ws ← loadWs o | return 1
+    let some ws ← loadWs o false | return 1
     if (ws.findMember? from_).isNone then
       IO.eprintln s!"error: unknown member `{from_}`"
       return 2
@@ -279,7 +285,7 @@ private def cmdWhy (o : CliOpts) (args : List String) : IO UInt32 := do
     return 2
 
 private def cmdMetadata (o : CliOpts) : IO UInt32 := do
-  let some ws ← loadWs o | return 1
+  let some ws ← loadWs o false | return 1
   if o.json then
     IO.println (Json.pretty (Backend.LakeCli.renderMetadata ws))
   else
@@ -317,10 +323,10 @@ def main (args : List String) : IO UInt32 := do
       match cmd with
       | "sync" => cmdSync o
       | "check" => cmdCheck o
-      | "build" => cmdBuildLike o fun _ => .build o.passthrough
-      | "clean" => cmdBuildLike o fun _ => .clean
-      | "test" => cmdBuildLike o fun _ => .test o.passthrough
-      | "lint" => cmdBuildLike o fun _ => .lint o.passthrough
+      | "build" => cmdBuildLike o o.affected.isSome fun _ => .build o.passthrough
+      | "clean" => cmdBuildLike o false fun _ => .clean
+      | "test" => cmdBuildLike o o.affected.isSome fun _ => .test o.passthrough
+      | "lint" => cmdBuildLike o o.affected.isSome fun _ => .lint o.passthrough
       | "graph" => cmdGraph o
       | "metadata" => cmdMetadata o
       | _ =>

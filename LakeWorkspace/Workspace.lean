@@ -7,6 +7,7 @@ Authors: Jacob Reinhold
 module
 
 import LakeWorkspace.Toml
+import Std.Data.HashMap
 public import LakeWorkspace.Diagnostics
 
 /-!
@@ -136,8 +137,13 @@ structure Workspace where
   /-- Module → owning member name, sorted by module. -/
   moduleOwners : Array (String × String)
   /-- Module → its imports (workspace modules and externals alike), for
-      module-level affected analysis. -/
+      module-level affected analysis. Empty when the index was skipped
+      (see `hasModuleImportIndex`); consumers must check that flag. -/
   moduleImports : Array (String × Array String)
+  /-- Whether `moduleImports` was actually computed during `load`
+      (`loadModuleImports := true`). `select`'s `--affected` path and the
+      architectural import check require it; everything else ignores it. -/
+  hasModuleImportIndex : Bool := true
   /-- The workspace toolchain (contents of the root `lean-toolchain`). -/
   toolchain : String
   deriving Repr, Inhabited
@@ -487,6 +493,32 @@ def parseImports (text : String) : Array String := Id.run do
       break
   return out
 
+/-! ## Bounded parallel mapping -/
+
+/-- Wave size for parallel file scanning. Lean core exposes no
+    processor-count query, so like `Executor.driverJobs` this is a fixed
+    bound: enough to overlap IO without hammering the filesystem. -/
+private def scanJobs : Nat := 8
+
+/-- `xs.mapM f` with bounded parallelism (waves of `scanJobs`),
+    preserving input order in the output — diagnostics and indexes stay
+    deterministic. Mirrors `Executor.runDrivers`' wave pattern. -/
+private def parallelMapM (xs : Array α) (f : α → IO β) : IO (Array β) := do
+  let mut out : Array β := #[]
+  let mut i := 0
+  while i < xs.size do
+    let wave := xs.extract i (min (i + scanJobs) xs.size)
+    let tasks ← wave.mapM fun x => IO.asTask (f x)
+    for t in tasks do
+      out := out.push (← IO.ofExcept (← IO.wait t))
+    i := i + scanJobs
+  return out
+
+/-- Print a bench phase timing to stderr when `bench` is on. -/
+private def benchMark (bench : Bool) (phase : String) (t0 : Nat) : IO Unit := do
+  if bench then
+    IO.eprintln s!"bench: {phase} {(← IO.monoMsNow) - t0}"
+
 /-! ## Glob expansion -/
 
 private def segMatch (pat seg : String) : Bool :=
@@ -667,6 +699,38 @@ def isTestMember (name : String) : Bool :=
   let n := name.toLower
   #["test", "tests", "bench", "benchmarks", "testing"].any fun suf => n.endsWith suf
 
+/-- Read the given module files of one member and check their imports against
+    the ownership index. Returns diagnostics and import-map entries in module
+    order; folded back in member order by the caller, so parallelism cannot
+    reorder output. -/
+private def memberImportScan (root : FilePath) (ownerMap : Std.HashMap String String)
+    (checkEdges : Bool) (m : MemberPkg) : IO (Diagnostics × Array (String × Array String)) := do
+  let mut diags : Diagnostics := #[]
+  let mut entries : Array (String × Array String) := #[]
+  for mod in m.modules do
+    let file : FilePath := root / m.relDir / (mod.replace "." "/" ++ ".lean")
+    let text? ← readOptionalFile file
+    if let some text := text? then
+      let imps := parseImports text
+      entries := entries.push (mod, imps)
+      if checkEdges then
+        for imp in imps do
+          match ownerMap.get? imp with
+          | none => pure () -- external or generated module; not our concern
+          | some owner =>
+            if owner != m.name then
+              let declared := m.requires.any (·.name == owner)
+              if !declared then
+                diags := diags ++ Diagnostics.error
+                  s!"module `{mod}` in package `{m.name}` imports `{imp}` from package \
+                     `{owner}`, but `{m.name}` does not declare a direct dependency on `{owner}`"
+                  #[s!"add `require {owner} from \"...\"` to {m.relDir.toString}/lakefile.lean"]
+              if isTestMember owner && !isTestMember m.name then
+                diags := diags ++ Diagnostics.error
+                  s!"production package `{m.name}` imports `{imp}` from test/benchmark \
+                     package `{owner}`"
+  return (diags, entries)
+
 partial def findCycle (names : Array String) (edges : Array (String × String))
     (start cur : String) (path : List String) : Option (List String) :=
   let nexts := edges.filterMap fun (a, b) => if a == cur then some b else none
@@ -685,8 +749,15 @@ def findAnyCycle (names : Array String) (edges : Array (String × String)) : Opt
 Load, discover and fully validate the workspace rooted at `root`
 (the directory containing `lean-workspace.toml`). No processes are spawned;
 the only IO is reading files under `root`.
--/
-def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
+
+`loadModuleImports := false` skips the per-module import index (step 12):
+consumers that never need it (`graph`, `metadata`, `clean`, `why`, builds
+without `--affected`) avoid one file read per module. The architectural
+import check runs with the index, so `check`/`sync` must keep the default.
+`bench := true` prints per-phase timings to stderr as `bench: <phase> <ms>`. -/
+def load (root : FilePath) (loadModuleImports : Bool := true) (bench : Bool := false) :
+    IO (Except Diagnostics Workspace) := do
+  let tStart ← IO.monoMsNow
   let mut diags : Diagnostics := #[]
   -- 1. Manifest
   let manifestPath := root / "lean-workspace.toml"
@@ -699,13 +770,17 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
     | .ok t => pure t
   let (cfgDiags, config) := parseConfig table
   diags := diags ++ cfgDiags
+  benchMark bench "manifest" tStart
   -- 2. Toolchain
+  let tTool ← IO.monoMsNow
   let toolchain ← match ← readOptionalFile (root / "lean-toolchain") with
     | some t => pure t.trimAscii.toString
     | none =>
       diags := diags ++ Diagnostics.warning "no root lean-toolchain file found"
       pure ""
+  benchMark bench "toolchain" tTool
   -- 3. Member discovery
+  let tDisc ← IO.monoMsNow
   let mut relDirs : Array FilePath := #[]
   for pat in config.memberPatterns do
     relDirs := relDirs ++ (← expandPattern root pat)
@@ -714,13 +789,17 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
   relDirs := relDirs.map (·.toString) |>.insertionSort (· < ·) |>.toList.eraseDups.toArray.map (⟨·⟩)
   if relDirs.isEmpty then
     diags := diags ++ Diagnostics.error "workspace member patterns matched no packages"
-  -- 4. Load members
+  benchMark bench "discovery" tDisc
+  -- 4. Load members (parallel waves; diagnostics folded back in relDir order)
+  let tMem ← IO.monoMsNow
+  let loaded ← parallelMapM relDirs (loadMember root)
   let mut members : Array MemberPkg := #[]
-  for rel in relDirs do
-    let (mDiags, m?) ← loadMember root rel
+  for (mDiags, m?) in loaded do
     diags := diags ++ mDiags
     if let some m := m? then members := members.push m
   members := members.insertionSort fun a b => a.name < b.name
+  benchMark bench "member-scan" tMem
+  let tVal ← IO.monoMsNow
   -- 5. Unique package names
   let names0 := members.map MemberPkg.name |>.toList.eraseDups
   let dupNames := names0.filter fun n => (members.filter (·.name == n)).size > 1
@@ -745,13 +824,17 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
             #[s!"{m.name}: {m.relDir.toString}", s!"{o.name}: {o.relDir.toString}"]
   -- 8. Module ownership + unique modules
   let mut moduleOwners : Array (String × String) := #[]
+  -- Hash side-index for O(1) lookup; the sorted array remains the model.
+  let mut ownerMap : Std.HashMap String String := {}
   for m in members do
     for mod in m.modules do
-      match moduleOwners.find? (·.1 == mod) with
-      | some (_, o) =>
+      match ownerMap.get? mod with
+      | some o =>
         diags := diags ++ Diagnostics.error
           s!"module `{mod}` is owned by both `{o}` and `{m.name}`"
-      | none => moduleOwners := moduleOwners.push (mod, m.name)
+      | none =>
+        ownerMap := ownerMap.insert mod m.name
+        moduleOwners := moduleOwners.push (mod, m.name)
   moduleOwners := moduleOwners.insertionSort fun a b => a.1 < b.1
   -- 9. Member edges + cycles
   let names := members.map MemberPkg.name
@@ -802,31 +885,17 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
     for d in gs do
       if !names.contains d then
         diags := diags ++ Diagnostics.error s!"group `{g}` references unknown member `{d}`"
+  benchMark bench "validate" tVal
   -- 12. Module import map + architectural import checking
+  let tImports ← IO.monoMsNow
   let mut moduleImports : Array (String × Array String) := #[]
-  for m in members do
-    for mod in m.modules do
-      let file : FilePath := root / m.relDir / (mod.replace "." "/" ++ ".lean")
-      let text? ← readOptionalFile file
-      if let some text := text? then
-        let imps := parseImports text
-        moduleImports := moduleImports.push (mod, imps)
-        if config.requireDirectImportEdges then
-          for imp in imps do
-            match moduleOwners.find? (·.1 == imp) with
-            | none => pure () -- external or generated module; not our concern
-            | some (_, owner) =>
-              if owner != m.name then
-                let declared := m.requires.any (·.name == owner)
-                if !declared then
-                  diags := diags ++ Diagnostics.error
-                    s!"module `{mod}` in package `{m.name}` imports `{imp}` from package \
-                       `{owner}`, but `{m.name}` does not declare a direct dependency on `{owner}`"
-                    #[s!"add `require {owner} from \"...\"` to {m.relDir.toString}/lakefile.lean"]
-                if isTestMember owner && !isTestMember m.name then
-                  diags := diags ++ Diagnostics.error
-                    s!"production package `{m.name}` imports `{imp}` from test/benchmark \
-                       package `{owner}`"
+  if loadModuleImports then
+    let scanned ← parallelMapM members
+      (memberImportScan root ownerMap config.requireDirectImportEdges)
+    for (sDiags, entries) in scanned do
+      diags := diags ++ sDiags
+      moduleImports := moduleImports ++ entries
+  benchMark bench "module-imports" tImports
   -- 13. [options] shared-option policy (validation, not propagation)
   for (optName, optVal) in config.options do
     for m in members do
@@ -852,8 +921,10 @@ def load (root : FilePath) : IO (Except Diagnostics Workspace) := do
   for d in diags do
     if d.severity == .warning then
       IO.eprintln (Diagnostics.render #[d])
+  benchMark bench "total" tStart
   return .ok {
     root, config, members, edges, externals, moduleOwners, moduleImports, toolchain
+    hasModuleImportIndex := loadModuleImports
   }
 
 /-! ## Dependency alignment (`lakew sync --write-deps`) -/
