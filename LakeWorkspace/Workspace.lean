@@ -765,7 +765,7 @@ def load (root : FilePath) (loadModuleImports : Bool := true) (bench : Bool := f
   let manifestText ← match manifestText? with
     | none => return .error (Diagnostics.error s!"no lean-workspace.toml found at {root.toString}")
     | some t => pure t
-  let table ← match Toml.parse manifestText with
+  let table ← match (← Toml.parse manifestText) with
     | .error e => return .error (Diagnostics.error s!"{manifestPath.toString}: {e}")
     | .ok t => pure t
   let (cfgDiags, config) := parseConfig table
@@ -965,7 +965,7 @@ def alignDepsWithCentral (root : FilePath) : IO (Except Diagnostics (Array FileP
   let manifestText ← match manifestText? with
     | none => return .error (Diagnostics.error s!"no lean-workspace.toml found at {root.toString}")
     | some t => pure t
-  let table ← match Toml.parse manifestText with
+  let table ← match (← Toml.parse manifestText) with
     | .error e => return .error (Diagnostics.error s!"lean-workspace.toml: {e}")
     | .ok t => pure t
   let (cfgDiags, config) := parseConfig table

@@ -6,15 +6,28 @@ Authors: Jacob Reinhold
 
 module
 
-/-!
-A minimal TOML reader, scoped to the `lean-workspace.toml` manifest schema.
+public import Lake.Toml
 
-Supported: `[section]` and dotted `[a.b.c]` headers, `key = value` pairs with
-string, boolean, integer and (possibly multi-line) array values, and `#`
-comments. This is deliberately *not* a general TOML implementation — the
-workspace manifest schema is the only caller, and the parser is private to
-the workspace layer. If the schema ever outgrows it, swap the internals; the
-`Table` query interface is the stable surface.
+/-!
+A TOML query layer over **Lake's own TOML reader** (`Lake.Toml.loadToml`,
+the same parser that reads real `lakefile.toml` files — lakew drives `lake`
+and pins the toolchain, so Lake is already an implicit dependency; delegating
+guarantees we accept exactly what Lake accepts).
+
+Consumers see a deliberately small *flat* model: dot-joined keys, the four
+value kinds our schemas use, and by-name queries. The volatile decisions —
+TOML syntax, `[[array-of-tables]]`, inline tables, Lake's tree-of-`Name`
+representation — are hidden behind this module and this module only.
+
+Two representation notes:
+
+- Lake's `RBDict` iterates in insertion (= source) order on the pinned
+  toolchain, so the flattened entries preserve source order; the golden
+  suite pins that behavior.
+- Values of kinds no consumer schema uses (floats, datetimes) parse fine but
+  are invisible to queries. Arrays whose elements are all tables flatten to
+  index-addressed entries (`require.0.name`, …) and are read back with
+  `Table.tables`; any other array stays a scalar `.arr`.
 -/
 public section
 
@@ -66,157 +79,71 @@ def subsections (t : Table) (pre : String) : Array String := Id.run do
 
 def keys (t : Table) : Array String := t.entries.map Prod.fst
 
+/-- The elements of an array-of-tables, in source order: `tables "require"`
+    on `[[require]] name = "a" … [[require]] name = "b" …` gives two tables
+    whose keys are `name`, … . -/
+def tables (t : Table) (pre : String) : Array Table := Id.run do
+  let mut indices : Array String := #[]
+  for (k, _) in t.entries do
+    if k.startsWith (pre ++ ".") then
+      let idx := ((k.drop (pre.length + 1)).takeWhile (· != '.')).toString
+      if !indices.contains idx then
+        indices := indices.push idx
+  indices.map fun idx =>
+    let pfx := s!"{pre}.{idx}."
+    { entries := t.entries.filterMap fun (k, v) =>
+        if k.startsWith pfx then some ((k.drop pfx.length).toString, v) else none }
+
 end Table
 
-/-! ## Parser -/
+/-! ## Parsing (delegated to Lake) -/
 
-private structure PState where
-  cs : Array Char
-  pos : Nat := 0
+/-- The string components of a TOML key `Name` (`a.b.c` → `#[a, b, c]`; a
+    quoted segment with a dot inside stays one component). -/
+private def nameComps : Lean.Name → Array String
+  | .str pre s => (nameComps pre).push s
+  | _ => #[]
 
-private def PState.eof (s : PState) : Bool := s.pos ≥ s.cs.size
-private def PState.peek? (s : PState) : Option Char := s.cs[s.pos]?
-private def PState.next (s : PState) : PState := { s with pos := s.pos + 1 }
-
-private def isKeyChar (c : Char) : Bool :=
-  c.isAlphanum || c == '_' || c == '-'
-
-/-- Skip spaces/tabs and (if `newlines`) newlines and `#` comments. -/
-private partial def skipTrivia (s : PState) (newlines : Bool) : PState := Id.run do
-  let mut s := s
-  repeat
-    match s.peek? with
-    | some ' ' | some '\t' | some '\r' => s := s.next
-    | some '\n' => if newlines then s := s.next else return s
-    | some '#' =>
-      repeat
-        match s.peek? with
-        | some '\n' | none => break
-        | some _ => s := s.next
-    | _ => return s
-  return s
-
-private partial def parseString (s : PState) : Except String (String × PState) := do
-  -- assumes opening quote consumed
-  let mut out := ""
-  let mut s := s
-  while true do
-    match s.peek? with
-    | none => throw "unterminated string literal"
-    | some '"' => return (out, s.next)
-    | some '\\' =>
-      let s1 := s.next
-      match s1.peek? with
-      | some 'n' => out := out ++ "\n"; s := s1.next
-      | some 't' => out := out ++ "\t"; s := s1.next
-      | some 'r' => out := out ++ "\r"; s := s1.next
-      | some '"' => out := out ++ "\""; s := s1.next
-      | some '\\' => out := out ++ "\\"; s := s1.next
-      | _ => throw "unsupported escape sequence"
-    | some c => out := out ++ String.ofList [c]; s := s.next
-  throw "unreachable"
-
-private partial def parseValue (s : PState) : Except String (Value × PState) := do
-  let s := skipTrivia s false
-  match s.peek? with
-  | none => throw "expected value"
-  | some '"' => parseString (s.next) |>.map fun (v, s') => (.str v, s')
-  | some '[' =>
-    -- array; newlines and comments allowed inside
-    let mut s := s.next
-    let mut xs : Array Value := #[]
-    while true do
-      s := skipTrivia s true
-      match s.peek? with
-      | none => throw "unterminated array"
-      | some ']' => return (.arr xs, s.next)
-      | _ =>
-        let (v, s') ← parseValue s
-        xs := xs.push v
-        s := skipTrivia s' true
-        match s.peek? with
-        | some ',' => s := s.next
-        | some ']' => return (.arr xs, s.next)
-        | _ => throw "expected ',' or ']' in array"
-    throw "unreachable"
-  | some c =>
-    if c == 't' || c == 'f' then
-      let word := String.ofList (s.cs.extract s.pos (s.pos + 5)).toList
-      if word.startsWith "true" then return (.boolean true, { s with pos := s.pos + 4 })
-      if word.startsWith "false" then return (.boolean false, { s with pos := s.pos + 5 })
-      throw s!"unexpected value starting with '{c}'"
-    else if c.isDigit || c == '-' then
-      let start := s.pos
-      let mut s := s
-      repeat
-        match s.peek? with
-        | some c => if c.isDigit || c == '-' || c == '_' then s := s.next else break
-        | none => break
-      let raw := String.ofList (s.cs.extract start s.pos).toList
-      let clean := String.ofList (raw.toList.filter (· != '_'))
-      match clean.toInt? with
-      | some n => return (.int n, s)
-      | none => throw s!"invalid integer literal '{raw}'"
+/-- Flatten one Lake TOML value into dot-joined entries under `comps`. -/
+private partial def flattenVal (comps : Array String) (v : Lake.Toml.Value) :
+    Array (String × Value) :=
+  let key := ".".intercalate comps.toList
+  match v with
+  | .string _ s => #[(key, .str s)]
+  | .boolean _ b => #[(key, .boolean b)]
+  | .integer _ n => #[(key, .int n)]
+  | .array _ xs =>
+    if !xs.isEmpty && xs.all (· matches .table ..) then
+      -- array-of-tables: index-addressed entries, source order
+      let indexed := xs.zipIdx
+      indexed.flatMap fun (x, i) =>
+        if let .table _ subt := x then
+          subt.keys.flatMap fun k =>
+            flattenVal (comps ++ #[toString i] ++ nameComps k) (subt.find? k).get!
+        else #[]
     else
-      throw s!"unexpected value starting with '{c}'"
+      let scalars := xs.filterMap fun
+        | .string _ s => some (Value.str s)
+        | .boolean _ b => some (Value.boolean b)
+        | .integer _ n => some (Value.int n)
+        | _ => none
+      #[(key, .arr scalars)]
+  | .table _ t =>
+    t.keys.flatMap fun k => flattenVal (comps ++ nameComps k) (t.find? k).get!
+  | .float _ _ | .dateTime _ _ => #[]
 
-/-- Parse a dotted key (`a.b.c`), returning its components. Segments may be
-    bare or "quoted". -/
-private partial def parseKey (s : PState) : Except String (Array String × PState) := do
-  let mut comps : Array String := #[]
-  let mut s := s
-  while true do
-    s := skipTrivia s false
-    match s.peek? with
-    | some '"' =>
-      let (v, s') ← parseString (s.next)
-      comps := comps.push v
-      s := s'
-    | _ =>
-      let start := s.pos
-      repeat
-        match s.peek? with
-        | some c => if isKeyChar c then s := s.next else break
-        | none => break
-      if s.pos == start then throw "expected key"
-      comps := comps.push (String.ofList (s.cs.extract start s.pos).toList)
-    s := skipTrivia s false
-    match s.peek? with
-    | some '.' => s := s.next
-    | _ => return (comps, s)
-  throw "unreachable"
-
-partial def parse (content : String) : Except String Table := do
-  let mut t : Table := {}
-  let mut curSection : Array String := #[]
-  let mut s : PState := { cs := content.toList.toArray }
-  while true do
-    s := skipTrivia s true
-    if s.eof then break
-    match s.peek? with
-    | some '[' =>
-      s := s.next
-      let (comps, s') ← parseKey s
-      s := skipTrivia s' false
-      match s.peek? with
-      | some ']' =>
-        s := s.next
-        curSection := comps
-      | _ => throw "expected ']' after section header"
-    | some _ =>
-      let (comps, s') ← parseKey s
-      s := skipTrivia s' false
-      match s.peek? with
-      | some '=' => s := s.next
-      | _ => throw s!"expected '=' after key '{".".intercalate comps.toList}'"
-      let (v, s'') ← parseValue s
-      s := s''
-      let key := ".".intercalate (curSection ++ comps).toList
-      if (t.entries.any fun (k, _) => k == key) then
-        throw s!"duplicate key '{key}'"
-      t := { t with entries := t.entries.push (key, v) }
-    | none => break
-  return t
+/-- Parse TOML text into the flat query model, using Lake's reader. -/
+def parse (content : String) : IO (Except String Table) := do
+  let ictx := Lean.Parser.mkInputContext content "<toml>"
+  match (← (Lake.Toml.loadToml ictx).toBaseIO) with
+  | .error log =>
+    let mut msgs : Array String := #[]
+    for msg in log.toList do
+      msgs := msgs.push (← msg.data.format).pretty
+    return .error ("\n".intercalate msgs.toList)
+  | .ok t =>
+    let entries := t.keys.flatMap fun k => flattenVal (nameComps k) (t.find? k).get!
+    return .ok { entries }
 
 end LakeWorkspace.Toml
 
