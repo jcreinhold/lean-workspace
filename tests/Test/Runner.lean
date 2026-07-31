@@ -48,6 +48,7 @@ private def registered : Array Suite := #[
   { name := "options-policy" },
   { name := "toml-lakefiles" },
   { name := "external-drivers" },
+  { name := "cache-policy" },
   { name := "bench", slow := true }]
 
 /-- What a run was asked to do. -/

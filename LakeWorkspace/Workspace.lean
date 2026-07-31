@@ -118,6 +118,13 @@ structure WorkspaceConfig where
   cacheLocal : Bool := true
   /-- `requested-only` | `package` | `workspace`. -/
   cacheRestore : String := "requested-only"
+  /-- Expected remote cache service (`lake cache services` output).
+      Validation-only: services live in the user's `~/.lake/config.toml`,
+      which lakew never writes. -/
+  cacheRemote : Option String := none
+  /-- Append `--try-cache` to sync's `lake update` (overrides a
+      `LAKE_NO_CACHE` environment for the resolve). -/
+  cacheTryCache : Bool := false
   uniqueModuleRoots : Bool := true
   requireDirectImportEdges : Bool := true
   memberToolchains : String := "must-match-root"
@@ -780,7 +787,7 @@ private def knownKeys (_t : Toml.Table) (groupNames depNames : Array String) : A
    , "policy.single-package-version", "policy.unique-module-roots"
    , "policy.require-direct-import-edges", "policy.member-toolchains"
    , "policy.conflicting-package-options"
-   , "cache.local", "cache.restore" ]
+   , "cache.local", "cache.restore", "cache.remote", "cache.try-cache" ]
   ++ groupNames.map (s!"groups.{·}.members")
   ++ depNames.flatMap fun d => #[s!"deps.{d}.git", s!"deps.{d}.rev", s!"deps.{d}.path"]
 
@@ -829,6 +836,13 @@ private def parseConfig (t : Toml.Table) : Diagnostics × WorkspaceConfig := Id.
     else
       diags := diags ++ Diagnostics.error
         s!"cache.restore must be one of requested-only|package|workspace, got `{r}`"
+  if let some s := t.getStr "cache.remote" then
+    if s.isEmpty then
+      diags := diags ++ Diagnostics.error "cache.remote must be a non-empty service name"
+    else
+      cfg := { cfg with cacheRemote := some s }
+  if let some b := t.getBool "cache.try-cache" then
+    cfg := { cfg with cacheTryCache := b }
   if let some b := t.getBool "policy.unique-module-roots" then
     cfg := { cfg with uniqueModuleRoots := b }
   if let some b := t.getBool "policy.require-direct-import-edges" then

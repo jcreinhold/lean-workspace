@@ -85,6 +85,14 @@ lean_exe «suite-external-drivers» where
   root := `Suites.ExternalDrivers
   supportInterpreter := true
 
+/- The cache-policy suite (PLAN-04; `tests/Suites/CachePolicy.lean`):
+`[cache]` → generated-root cache knobs, `--try-cache` on sync, remote-service
+validation, and the `lakew cache` pass-through/status command. -/
+lean_exe «suite-cache-policy» where
+  srcDir := "tests"
+  root := `Suites.CachePolicy
+  supportInterpreter := true
+
 lean_exe «suite-bench» where
   srcDir := "tests"
   root := `Suites.Bench

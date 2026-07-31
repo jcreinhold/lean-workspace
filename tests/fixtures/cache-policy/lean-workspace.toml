@@ -1,0 +1,7 @@
+[workspace]
+name = "cachepolicy"
+members = ["packages/*"]
+
+[cache]
+try-cache = true
+remote = "reservoir"

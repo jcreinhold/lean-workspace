@@ -132,3 +132,29 @@ scans of the *same* package within one invocation, which the two-phase
 `resolveDrivers` (static scan pass, then a single shared `lake scripts`
 probe) already makes impossible for the probe and rare for the scan. No
 speculative surface; revisit if a profile ever shows external scans.
+
+## PLAN-04: remote cache configuration (decision record)
+
+Plan 04 adds `[cache].remote` (validation-only), `[cache].try-cache` (one
+flag on sync's existing `lake update`), and the `lakew cache` pass-through.
+The two generated-root cache stanzas (`enableArtifactCache`,
+`restoreAllArtifacts`) already existed since milestone 1, so nothing in the
+load/plan/render hot paths changed shape: the bench fixtures were left
+unchanged and all gates still pass.
+
+The plan's step 6 asked for a sync-time measurement of `--try-cache` on a
+fixture with one Reservoir dep, "no target". Decision: **not measured as a
+benchmark**. `--try-cache` is one argv element on the one `lake update`
+subprocess sync already runs — zero added lakew-side work (no new spawns,
+no new reads). What it adds at runtime is Lake's cache download, which is
+network-bound and belongs to Lake, not to lakew's load path; timing it
+would benchmark the network. Recorded here in lieu of a number.
+
+Spike facts (v4.33-rc1, path-dependency workspace, recorded in the plan
+file): root `enableArtifactCache := true` propagates to a dependency that
+sets nothing — its oleans land in the toolchain cache
+(`…/lib/lake/cache/artifacts/<hash>.olean`) and its build dir keeps only
+`.ilean`; root `restoreAllArtifacts := true` restores the classic
+build-dir layout; `LAKE_ARTIFACT_CACHE=0` overrides the root config (env
+beats root in Lake's fallback order); `lake cache services` prints one
+service name per line.

@@ -33,7 +33,8 @@ Modeled on a mature Cargo workspace (e.g. [mdwright](https://github.com/jcreinho
 | `cargo clean -p foo` | `lakew clean -p foo` | |
 | (nx/turborepo affected selection) | `lakew build/test --changed [--affected] <ref>` | not in Cargo itself; `--changed` is package-level, `--affected` uses the reverse module-import closure |
 | `[workspace.package]` (shared version/license) | **N/A** | Lake packages carry no version metadata; toolchain+rev is the Lean versioning idiom |
-| `[profile.*]` | **not yet** | Lake `buildType` is per-package and does not propagate; planned with the remote-cache milestone |
+| `[profile.*]` | `[cache]` (partial) | Lake's artifact-cache knobs **propagate from the workspace root** — `cache.local`/`cache.restore` become real configuration in the generated root; `cache.try-cache` flags sync's update; `cache.remote` validates an expected `lake cache services` entry. `buildType` stays per-package (does not propagate) |
+| (sccache/mostly CI cache fetches) | `lakew cache get\|put\|services\|status` | thin pass-through to `lake cache` from the root; `status` reports the effective policy |
 
 ## Commands
 
@@ -77,8 +78,11 @@ require-direct-import-edges = true
 member-toolchains = "must-match-root"
 
 [cache]
-local = true
-restore = "requested-only"          # requested-only | package | workspace
+local = true                      # enableArtifactCache in the generated root
+restore = "requested-only"        # requested-only | package | workspace → restoreAllArtifacts
+try-cache = true                  # sync's lake update gets --try-cache
+remote = "my-s3"                  # optional: must exist in `lake cache services`
+                                  # (validation only; services live in ~/.lake/config.toml)
 
 [options]                           # ≡ [workspace.lints] (policy-validated)
 "linter.missingDocs" = true
@@ -112,6 +116,28 @@ TOML-specific notes:
 - **Module discovery stays on-disk.** TOML `globs` restrict what Lake
   *builds*, not what's on disk; lakew's module index walks the source tree
   for both formats.
+
+## `[cache]` policy (real configuration, not validation)
+
+Unlike `leanOptions`, Lake's artifact-cache knobs **propagate from the
+workspace root to every member and dependency that does not set its own
+value** — the channel lakew's generated virtual root owns. So `[cache]` is
+real configuration: `local`/`restore` become `enableArtifactCache` /
+`restoreAllArtifacts` in the generated root lakefile (spiked: a dependency's
+oleans land in the toolchain's shared cache, and `restore = "workspace"`
+restores the classic build-dir layout for tools that hard-code paths — the
+milestone-1 artifact gotcha). Environment variables (`LAKE_ARTIFACT_CACHE`,
+`LAKE_RESTORE_ARTIFACTS`) override the root config, matching Lake's own
+fallback order. `try-cache` appends `--try-cache` to sync's one `lake
+update` (overriding `LAKE_NO_CACHE` for the resolve).
+
+Remote services (`reservoir`, S3, …) are configured in the **system** config
+`~/.lake/config.toml`, never per-repo — lakew does not generate or validate
+credentials. `cache.remote` is validation-only: `lakew check` (and `lakew
+cache status`) fail when the named service is absent from `lake cache
+services`, naming the service and the fix. `lakew cache get|put|…` is a thin
+pass-through to `lake cache` from the workspace root — the CI story is
+`lakew cache get` before `lakew build`.
 
 ## Tests and lints (doc §7 semantics)
 

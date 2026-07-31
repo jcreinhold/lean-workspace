@@ -185,7 +185,8 @@ def plan (ws : Workspace) (sel : Selection) (action : Action) :
     let steps : Array PlanStep :=
       if locked then #[.verifyFiles files]
       else if offline then #[.installFiles files]
-      else #[.installFiles files, .runLake #["update"]]
+      else #[.installFiles files, .runLake (#["update"] ++
+        if ws.config.cacheTryCache then #["--try-cache"] else #[])]
     return .ok {
       root := ws.root
       label := if locked then "sync --locked" else if offline then "sync --offline" else "sync"

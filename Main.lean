@@ -36,6 +36,8 @@ private def usage : String :=
   "  clean     `lake clean` for the selected targets.\n" ++
   "  graph     Print the member dependency graph.\n" ++
   "  metadata  Print canonical workspace metadata.\n" ++
+  "  cache     `lake cache` from the workspace root (args forwarded verbatim),\n" ++
+  "            or `lakew cache status` for the effective [cache] policy.\n" ++
   "\n" ++
   "COMMON OPTIONS\n" ++
   "  --root <dir>   workspace root (default: nearest lean-workspace.toml\n" ++
@@ -221,14 +223,70 @@ private def cmdSync (o : CliOpts) : IO UInt32 := do
 private def cmdCheck (o : CliOpts) : IO UInt32 := do
   let some ws ← loadWs o | return 1
   let stale ← LakeWorkspace.staleFiles ws
-  if stale.isEmpty then
-    IO.println "workspace is up to date"
-    return 0
-  else
+  let mut failed := false
+  if !stale.isEmpty then
     IO.eprintln "error: generated files are stale; run `lakew sync`:"
     for s in stale do
       IO.eprintln s!"  {s}"
+    failed := true
+  -- `[cache].remote` is validation-only: the service must exist in the
+  -- user's system config, which lakew never writes.
+  if let some svc := ws.config.cacheRemote then
+    let services ← Backend.LakeCli.lakeCacheServices ws.root
+    if !services.contains svc then
+      IO.eprintln s!"error: cache.remote expects service `{svc}`, but it is not configured"
+      if services.isEmpty then
+        IO.eprintln "  no remote cache services are configured"
+      else
+        IO.eprintln s!"  configured services: {", ".intercalate services.toList}"
+      IO.eprintln "  add it to ~/.lake/config.toml (current services: `lake cache services`)"
+      failed := true
+  if failed then
     return 1
+  IO.println "workspace is up to date"
+  return 0
+
+/-- `lakew cache`: a convenience alias over `lake cache` — one subprocess
+    from the workspace root with the remaining args forwarded verbatim —
+    plus `status`, which reports the effective `[cache]` policy and the
+    configured remote services. No policy logic beyond that: credentials
+    and service definitions stay in the user's `~/.lake/config.toml`. -/
+private def cmdCache (o : CliOpts) (pos : List String) : IO UInt32 := do
+  match pos with
+  | ["status"] =>
+    let some ws ← loadWs o false | return 1
+    let restoreAll := ws.config.cacheRestore != "requested-only"
+    IO.println s!"cache.local     = {ws.config.cacheLocal}  (generated root: enableArtifactCache := {ws.config.cacheLocal})"
+    IO.println s!"cache.restore   = {ws.config.cacheRestore}  (generated root: restoreAllArtifacts := {restoreAll})"
+    IO.println s!"cache.try-cache = {ws.config.cacheTryCache}  (sync's lake update{if ws.config.cacheTryCache then " gets --try-cache" else " is plain"})"
+    match ws.config.cacheRemote with
+    | none => IO.println "cache.remote    = none"
+    | some svc => IO.println s!"cache.remote    = {svc}"
+    let services ← Backend.LakeCli.lakeCacheServices ws.root
+    if services.isEmpty then
+      IO.println "remote services (`lake cache services`): none"
+    else
+      IO.println s!"remote services (`lake cache services`): {", ".intercalate services.toList}"
+    match ws.config.cacheRemote with
+    | some svc =>
+      if services.contains svc then
+        IO.println s!"cache.remote service `{svc}` is configured"
+        return 0
+      else
+        IO.eprintln s!"error: cache.remote service `{svc}` is not configured; \
+          add it to ~/.lake/config.toml"
+        return 1
+    | none => return 0
+  | [] =>
+    IO.eprintln "usage: lakew cache <get|put|services|status|…> [args…]  (forwards to `lake cache`)"
+    return 2
+  | sub :: rest =>
+    match (← findWsRoot o) with
+    | none =>
+      IO.eprintln "error: no lean-workspace.toml found at or above the current directory"
+      return 1
+    | some root =>
+      Executor.runLake root (#["cache", sub] ++ rest.toArray)
 
 private def cmdBuildLike (o : CliOpts) (needsModuleImports : Bool) (action : Selection → Action) :
     IO UInt32 := do
@@ -314,6 +372,17 @@ def main (args : List String) : IO UInt32 := do
       | "--root" :: r :: as' => o := { o with root := some ⟨r⟩ }; rs := as'
       | a :: as' => pos := pos ++ [a]; rs := as'
     cmdWhy o pos
+  | "cache" :: rest =>
+    -- cache forwards positional args verbatim; mini-parse only --root
+    let mut o : CliOpts := {}
+    let mut pos : List String := []
+    let mut rs := rest
+    repeat
+      match rs with
+      | [] => break
+      | "--root" :: r :: as' => o := { o with root := some ⟨r⟩ }; rs := as'
+      | a :: as' => pos := pos ++ [a]; rs := as'
+    cmdCache o pos
   | cmd :: rest =>
     match parseArgs rest with
     | .error e =>

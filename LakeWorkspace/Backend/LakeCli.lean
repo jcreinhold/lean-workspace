@@ -15,8 +15,9 @@ This module is the *only* place that knows the syntax of a Lake
 `lakefile.lean`, the JSON schema of `.lake/package-overrides.json`, and the
 command-line surface of the pinned `lake` executable. The rendering/decision
 functions are pure; process spawning lives in `LakeWorkspace.Executor`, with
-one exception: `lakeScripts` is a read-only probe needed *during* planning
-(Executor imports the plan types, so the reverse edge would cycle).
+one class of exceptions: `lakeScripts`/`lakeCacheServices` are read-only
+probes needed *during* planning/checking (Executor imports the plan types,
+so the reverse edge would cycle).
 -/
 
 public section
@@ -137,6 +138,18 @@ def lakeScripts (root : FilePath) : IO (Array (String × String)) := do
     match line.trimAscii.toString.splitOn "/" with
     | [p, n] => some (p, n)
     | _ => none) |>.toArray
+
+/-- The configured remote cache services, parsed from `lake cache services`
+    (one name per line). Read-only probe; services themselves are configured
+    in the user's system config (`~/.lake/config.toml`), which lakew never
+    writes — this exists so `lakew check` can validate `[cache].remote`
+    against reality. A failed probe yields no services. -/
+def lakeCacheServices (root : FilePath) : IO (Array String) := do
+  let out ← IO.Process.output
+    { cmd := "lake", args := #["cache", "services"], cwd := some root }
+  if out.exitCode != 0 then return #[]
+  return out.stdout.splitOn "\n"
+    |>.map (·.trimAscii.toString) |>.filter (!·.isEmpty) |>.toArray
 
 end LakeWorkspace.Backend.LakeCli
 
