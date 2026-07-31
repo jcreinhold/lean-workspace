@@ -9,6 +9,7 @@ module
 public import Test.Harness
 public import Test.Proc
 public import Test.Fixture
+public import Test.Golden
 
 /-!
 # The shared test library

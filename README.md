@@ -124,20 +124,27 @@ splice into their own `leanOptions`.
 
 ```bash
 lake build          # builds lakew itself (Lean module system, v4.33.0-rc1)
-bash test/run.sh    # legacy shell suite: goldens, fixtures, violations, stock-lake interop
+lake test           # the test suite: sync/goldens, diagnostics, deps, drivers, affected, options
 ```
 
-New tests and benchmarks are native Lean suites in the `tests/` tree (lean-fmt
-style), sharing the `TestSupport` library (`tests/Test`: harness, process
-spawning, temp-dir fixtures):
+Tests are native Lean suites in the `tests/` tree (lean-fmt style): a shared
+`TestSupport` library (`tests/Test`: harness, process spawning, temp-dir
+fixtures, golden files), one executable per concern (`tests/Suites`), and an
+orchestrator (`tests/Test/Runner.lean`) as the package `testDriver`. Each
+suite drives the real `lakew` binary against a copied fixture project in a
+temp dir. Adding a suite is one `lean_exe «suite-<name>»` in the lakefile
+plus one line in the runner's registry. Golden files regenerate with
+`UPDATE_GOLDEN=1`.
 
 ```bash
-lake build suite-bench && .lake/build/bin/suite-bench   # load-path benchmark
+lake test -- --list                    # suite registry
+lake test -- --suites sync drivers     # a subset
+lake test -- --all                     # include the slow benchmark suite
+.lake/build/bin/suite-sync --filter golden   # one suite, filtered
 ```
 
 The benchmark suite's measurements and optimization decisions live in
-`tests/bench.md`. `test/run.sh` remains the CI regression gate; its suites
-migrate onto `TestSupport` incrementally.
+`tests/bench.md`.
 
 Toolchain: `leanprover/lean4:v4.33.0-rc1`.
 
@@ -154,4 +161,10 @@ LakeWorkspace/
   Backend/LakeCli.lean      # the only Lake-version-coupled module (generated-file formats)
   Backend/Git.lean          # changed-path gathering
 Main.lean                   # the lakew CLI
+tests/
+  Test/                     # shared harness: assertions, processes, fixtures, goldens, runner
+  Suites/                   # one executable suite per concern (+ the benchmark)
+  fixtures/                 # committed fixture projects (copied to temp dirs by suites)
+  golden/                   # committed expected outputs (UPDATE_GOLDEN=1 regenerates)
+  bench.md                  # load-path benchmark decision log
 ```

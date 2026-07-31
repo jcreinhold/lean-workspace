@@ -20,8 +20,8 @@ jobs:
       - name: Build lakew
         run: lake build
 
-      - name: Build the native test harness and benchmark suite
-        run: lake build TestSupport suite-bench
+      - name: Run test suite (functional suites, goldens, violations, stock-lake interop)
+        run: lake test
 
-      - name: Run test suite (golden, fixtures, diagnostics, stock-lake interop)
-        run: bash test/run.sh
+      - name: Build the benchmark suite (not timed in CI)
+        run: lake build suite-bench

@@ -38,6 +38,27 @@ public def ensureEq [BEq α] [Repr α] (label : String) (expected actual : α) :
   unless actual == expected do
     throw <| IO.userError s!"{label}\n  expected: {repr expected}\n  actual:   {repr actual}"
 
+/-- How many times `needle` occurs in `haystack` (non-overlapping). -/
+public def countOccurrences (needle haystack : String) : Nat :=
+  (haystack.splitOn needle).length - 1
+
+/-- Substring assertion: `haystack` must contain `needle`. The failure quotes
+the haystack so a diagnostic regression is readable in the log. -/
+public def ensureContains (label needle haystack : String) : IO Unit :=
+  ensure (haystack.contains needle)
+    s!"{label}: missing `{needle}` in:\n{haystack}"
+
+/-- Negative substring assertion: `haystack` must not contain `needle`. -/
+public def ensureAbsent (label needle haystack : String) : IO Unit :=
+  ensure (!haystack.contains needle)
+    s!"{label}: unexpected `{needle}` in:\n{haystack}"
+
+/-- Occurrence-count assertion, for "exactly one build step" shapes. -/
+public def ensureCount (label needle : String) (expected : Nat) (haystack : String) : IO Unit := do
+  let actual := countOccurrences needle haystack
+  ensure (actual == expected)
+    s!"{label}: expected {expected} occurrence(s) of `{needle}`, found {actual} in:\n{haystack}"
+
 /-- Which tests a run should execute, parsed from the runner's command line. -/
 public structure Selection where
   /-- Substring a test name must contain to run. -/
