@@ -1,27 +1,46 @@
+# Continuous integration for lean-workspace.
+#
+# test: every push to main and every pull request. leanprover/lean-action installs the pinned
+# toolchain and builds the package; `lake test` then runs every functional suite (sync,
+# diagnostics, shared-deps, drivers, affected, options-policy, toml-lakefiles,
+# external-drivers, cache-policy). `lake build suite-bench` keeps the benchmark suite
+# compiling without timing it — its gates are wall-clock ratios, which runner noise would
+# fail (see tests/bench.md).
+#
+# slow: the complete set, benchmark included, on manual dispatch only. Expect flaky reds
+# from the wall-clock gates; this job exists so a human can run the benchmark on a clean
+# machine without checking out locally.
+
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push supersedes a run still in flight on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install elan (Lean toolchain manager)
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-            | sh -s -- -y --default-toolchain none
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-
-      - name: Build lakew
-        run: lake build
-
-      - name: Run test suite (functional suites, goldens, violations, stock-lake interop)
-        run: lake test
-
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - run: lake test
       - name: Build the benchmark suite (not timed in CI)
         run: lake build suite-bench
+
+  slow:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - run: lake test -- --all

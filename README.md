@@ -12,7 +12,11 @@ result, so editors, contributors, and CI need no `lakew` install.
 
 ## Install
 
-Build from source. You need [elan](https://github.com/leanprover/elan); it installs the
+Download a prebuilt binary from the [releases
+page](https://github.com/jcreinhold/lean-workspace/releases) (Linux x86_64 and aarch64,
+macOS Intel and Apple silicon), unpack it, and put `lakew` on your `PATH`.
+
+Or build from source. You need [elan](https://github.com/leanprover/elan); it installs the
 pinned toolchain (`lean-toolchain`, currently `leanprover/lean4:v4.33.0-rc1`) on first build.
 
 ```bash
@@ -22,6 +26,9 @@ lake build
 ```
 
 The binary lands at `.lake/build/bin/lakew`. Put it on your `PATH`, then run `lakew --help`.
+
+Either way, `lakew` needs a Lean toolchain at run time — it drives `lake` and `git` as
+subprocesses — so keep elan installed on every machine that runs it.
 
 ## Quick start
 
