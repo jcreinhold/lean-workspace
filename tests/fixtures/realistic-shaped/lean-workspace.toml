@@ -1,5 +1,5 @@
 [workspace]
-name = "kan-shaped"
+name = "realistic-shaped"
 members = ["packages/*"]
 
 [deps.mathlib]

@@ -93,9 +93,9 @@ lean_exe «suite-cache-policy» where
   root := `Suites.CachePolicy
   supportInterpreter := true
 
-lean_exe «suite-kan-shaped» where
+lean_exe «suite-realistic-shaped» where
   srcDir := "tests"
-  root := `Suites.KanShaped
+  root := `Suites.RealisticShaped
   supportInterpreter := true
 
 /- The load-path benchmark suite (`tests/Suites/Bench.lean`). Slow: out of

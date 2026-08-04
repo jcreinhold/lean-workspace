@@ -49,7 +49,7 @@ private def registered : Array Suite := #[
   { name := "toml-lakefiles" },
   { name := "external-drivers" },
   { name := "cache-policy" },
-  { name := "kan-shaped" },
+  { name := "realistic-shaped" },
   { name := "bench", slow := true }]
 
 /-- What a run was asked to do. -/

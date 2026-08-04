@@ -17,15 +17,15 @@ require mathlib from git "https://example.invalid/mathlib4" @ "master"
 require checkdecls from git "https://example.invalid/checkdecls.git"
 require «lean-fmt» from git "https://example.invalid/lean-fmt" @ "v0.1.9"
 
-package KanProofs where
+package Proofs where
   version := v!"0.1.0"
   lintDriver := "runLinter"
-  lintDriverArgs := #["KanProofs"]
+  lintDriverArgs := #["Proofs"]
   plugins := #[`@«lean-fmt»/LeanFmtCompilerPlugin:shared]
   fixedToolchain := true
   platformIndependent := true
 
-@[default_target] lean_lib KanProofs where
+@[default_target] lean_lib Proofs where
   leanOptions := #[⟨`autoImplicit, false⟩, ⟨`weak.linter.allScriptsDocumented, true⟩]
 
 lean_lib ShakeSafe where
